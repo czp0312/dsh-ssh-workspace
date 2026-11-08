@@ -19,6 +19,8 @@ export class RemoteBackends {
   private health = new Map<string, ConnectionHealth>()
   private epochs = new Map<string, number>()
   private operations = new Map<string, AbortController>()
+  private registrations = new Map<string, Map<string, any>>()
+  private registrationRevision = new Map<string, number>()
   private publication = Promise.resolve()
   private disposed = false
   constructor(private file: string, private transport: RemoteTransport, private config: PluginConfig = {}) {}
@@ -37,11 +39,16 @@ export class RemoteBackends {
   list(): Array<BackendProject & WorkspaceView> {
     return structuredClone(this.records.filter(row => row.removedAt === undefined).map(row => {
       const running = this.running.get(row.backendId)
+      const snapshot = this.registrations.get(row.backendId)
+      const remote = snapshot?.get(row.workspaceId)
+      const registered = !snapshot || remote?.path === row.target.remotePath
       const state = this.blocked(row.backendId) ? { connectionState: 'disconnected' as const }
+        : !registered ? { connectionState: 'error' as const, connectionError: '远端项目登记已不存在或已变化。请重新添加此目录；文件和旧会话保留，不会自动迁移历史。' }
+        : this.health.get(row.backendId)?.connectionState === 'error' ? this.health.get(row.backendId)!
         : running && !running.wire.isStale ? { connectionState: 'connected' as const, checkedAt: this.health.get(row.backendId)?.checkedAt }
         : running?.wire.isStale ? { connectionState: 'error' as const, checkedAt: this.health.get(row.backendId)?.checkedAt, connectionError: this.health.get(row.backendId)?.connectionError ?? '远程连接已中断，请重新连接。' }
         : this.health.get(row.backendId) ?? { connectionState: 'disconnected' as const }
-      return { ...row, registered: true, ...state, online: state.connectionState === 'connected', sharedConnectionCount: this.records.filter(item => item.backendId === row.backendId && item.removedAt === undefined).length }
+      return { ...row, ...(remote && registered ? { workspace: remote } : {}), registered, ...state, online: state.connectionState === 'connected', sharedConnectionCount: this.records.filter(item => item.backendId === row.backendId && item.removedAt === undefined).length }
     }))
   }
   sources(): string[] { return [...new Set(this.records.filter(row => row.removedAt === undefined && !this.blocked(row.backendId)).map(row => row.backendId))] }
@@ -86,9 +93,13 @@ export class RemoteBackends {
       const done = (async () => {
         if (running) await this.closeRunning(id)
         const next = await this.createConnection(target, combined)
-        if (this.disposed || combined.aborted || (!explicit && this.blocked(id))) {
+        try {
+          const snapshot = await this.readRegistrations(id, next.wire, combined)
+          if (this.disposed || combined.aborted || (!explicit && this.blocked(id))) throw new Error('远程连接已取消。')
+          this.registrations.set(id, snapshot)
+        } catch (error) {
           next.wire.close(); await next.tunnel.close()
-          throw new Error('远程连接已取消。')
+          throw error
         }
         this.running.set(id, next)
         this.health.set(id, { connectionState: 'connected', checkedAt: Date.now() })
@@ -112,6 +123,7 @@ export class RemoteBackends {
   workspaceOperation(id: string): { target: RemoteTarget; signal: AbortSignal } {
     const record = this.records.find(row => row.id === id && row.removedAt === undefined)
     if (!record) throw new Error('请为全量工作区选择同步。')
+    if (this.list().find(row => row.id === id)?.registered === false) throw new Error('远端项目尚未登记，请先重新添加目录。')
     const running = this.running.get(record.backendId)
     if (this.blocked(record.backendId) || !running || running.wire.isStale) throw new Error('请先连接此全量工作区，再同步技能。')
     let controller = this.operations.get(record.backendId)
@@ -138,8 +150,16 @@ export class RemoteBackends {
       if ((this.epochs.get(id) ?? 0) !== epoch || signal?.aborted) throw new Error('连接操作已取消，请重新选择连接。')
       const previous = records.find(row => row.backendId === id && row.workspaceId === remoteId(id, workspace.workspaceId))
       record = { id: previous?.id ?? randomUUID(), backendId: id, backend: true, workspaceId: remoteId(id, workspace.workspaceId), title, localPath: workspace.path, target: { ...target, remotePath: workspace.path }, createdAt: previous?.createdAt ?? Date.now(), workspace }
-      return [...records.filter(row => row.id !== record.id).map(row => row.backendId === id ? this.resumed(row) : row), record]
+      return [...records.filter(row => row.id !== record.id).map(row => {
+        if (row.backendId !== id) return row
+        // An explicitly re-added directory may have a new native identity after
+        // deletion on the remote DSH. Retain old routing without rebinding history.
+        const stale = row.workspaceId !== record.workspaceId && targetKey(row.target) === targetKey(record.target)
+        return { ...this.resumed(row), ...(stale ? { removedAt: row.removedAt ?? Date.now() } : {}) }
+      }), record]
     })
+    this.registrations.get(id)?.set(record.workspaceId, workspace)
+    this.registrationRevision.set(id, (this.registrationRevision.get(id) ?? 0) + 1)
     if ((this.epochs.get(id) ?? 0) === epoch) this.paused.delete(id)
     return structuredClone(record)
   }
@@ -155,6 +175,7 @@ export class RemoteBackends {
       return records.map(row => row.backendId === record.backendId ? this.resumed(row) : row)
     })
     if ((this.epochs.get(record.backendId) ?? 0) === epoch) this.paused.delete(record.backendId)
+    if (!this.list().find(row => row.id === id)?.registered) throw new Error('远端项目登记已不存在或已变化。请使用“重新添加目录”；不会自动迁移旧会话。')
     return this.resumed(record)
   }
   private resumed(record: BackendProject): BackendProject { const { disconnected: _disconnected, ...retained } = record; return retained }
@@ -180,11 +201,33 @@ export class RemoteBackends {
     this.running.delete(id); previous.wire.close(); await previous.tunnel.close()
   }
 
+  private async readRegistrations(id: string, wire: BackendWire, signal: AbortSignal): Promise<Map<string, any>> {
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(8_000)])
+    const stream = await wire.open('workspace/follow', { args: {} }, deadline)
+    try {
+      while (true) {
+        deadline.throwIfAborted()
+        for (const frame of await wire.poll(stream, deadline)) {
+          if (frame.type !== 'item') throw new Error('无法读取远端项目登记，请重新连接。')
+          const value = frame.value as any
+          if (value?.type === 'baseline' && Array.isArray(value.value?.items)) {
+            return new Map(value.value.items.map((workspace: any) => [remoteId(id, workspace.workspaceId), workspace]))
+          }
+        }
+      }
+    } finally { wire.cancel(stream) }
+  }
+
   async checkHealth(signal: AbortSignal): Promise<void> {
     await Promise.allSettled([...this.running].filter(([id]) => !this.blocked(id)).map(async ([id, running]) => {
       try {
         await running.wire.checkHealth(AbortSignal.any([signal, AbortSignal.timeout(8_000)]))
-        if (this.running.get(id) === running) this.health.set(id, { connectionState: 'connected', checkedAt: Date.now() })
+        const revision = this.registrationRevision.get(id)
+        const snapshot = await this.readRegistrations(id, running.wire, signal)
+        if (this.running.get(id) === running) {
+          if (revision === this.registrationRevision.get(id)) this.registrations.set(id, snapshot)
+          this.health.set(id, { connectionState: 'connected', checkedAt: Date.now() })
+        }
       } catch (error) {
         if (!signal.aborted && !this.blocked(id) && this.running.get(id) === running) this.health.set(id, { connectionState: 'error', checkedAt: Date.now(), connectionError: error instanceof Error ? error.message : '远程后端不可达' })
       }

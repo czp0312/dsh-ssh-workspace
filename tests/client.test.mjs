@@ -20,7 +20,7 @@ const bundle = await readFile(new URL('../lib/client.js', import.meta.url), 'utf
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 test.after(() => dom.window.close())
 
-async function mount({ respond, initialSaved = [], hostPaths } = {}) {
+async function mount({ respond, initialSaved = [], hostPaths, navigate } = {}) {
   const calls = []
   const opened = []
   const saved = [...initialSaved]
@@ -48,7 +48,7 @@ async function mount({ respond, initialSaved = [], hostPaths } = {}) {
     if (!main) throw new Error('Main panel has not registered')
     main.root.render(id === main.options.key ? createElement(main.Component, main.options.inject()) : null)
   }
-  const navigation = { startSession: id => { opened.push(id); selectPanel(null) } }
+  const navigation = { async openWorkspace(id) { if (navigate) await navigate(id); opened.push(id); selectPanel(null) }, startSession: id => { throw new Error('Use the awaitable native navigation, not the fire-and-forget shortcut') } }
   const host = {
     effect(setup) { const dispose = setup(); if (typeof dispose === 'function') cleanup.push(dispose) },
     get(name) { return name === 'uiWorkspace' ? navigation : name === 'layout' ? { selectPanel } : undefined },
@@ -209,9 +209,10 @@ test('SSH project setup deploys a backend without asking for an SSHFS mount', as
     await input('host', 'dev-alias')
     await input('path', '/srv/project')
     assert.equal(document.querySelector('input[id$="-localPath"]'), null)
+    assert.match(document.querySelector('.dsh-ssh__form-footer').textContent, /远端 DSH.*不自动复制本机密钥/)
     await click(button('添加到工作区'))
     assert.deepEqual(fixture.calls.find(call => call.method === 'add').input, { target: { kind: 'ssh', host: 'dev-alias', remotePath: '/srv/project' }, mode: 'full' })
-    assert.match(document.querySelector('.dsh-ssh__form-footer').textContent, /远端 DSH.*不自动复制本机密钥/)
+    assert.equal(document.querySelector('.dsh-ssh__new'), null, 'successful add returns to projects')
   } finally { await fixture.dispose() }
 })
 
@@ -230,7 +231,8 @@ test('SSH explicit key paths are used by connection tests, directory browsing an
     await click(button('浏览目录'))
     await click(button('添加到工作区'))
     for (const method of ['test', 'browse', 'add']) assert.equal(fixture.calls.find(call => call.method === method).input.target.identityFile, 'C:\\Keys with spaces\\dev.pem')
-    assert.match(document.querySelector('.dsh-ssh__connection').textContent, /密钥：C:\\Keys with spaces\\dev.pem/)
+    await click(button('设置 project 的连接模式'))
+    assert.match(document.querySelector('.dsh-ssh__credentials').textContent, /密钥.*C:\\Keys with spaces\\dev.pem/)
   } finally { await fixture.dispose() }
 })
 
@@ -271,6 +273,7 @@ test('all four login modes mask secrets and password authentication keeps creden
       assert.equal(JSON.stringify(payload.target).includes('synthetic-password'), false)
     }
     assert.equal(JSON.stringify(fixture.saved).includes('synthetic-password'), false)
+    await click(button('添加项目'))
     assert.equal(document.querySelector('input[id$="-password"]').value, '')
   } finally { await fixture.dispose() }
 })
@@ -348,10 +351,11 @@ test('SSH and WSL each remember their mode and lightweight WSL sends no deployme
     await click(button('SSH'))
     assert.equal(document.querySelector('input[value="light"]').checked, true)
     await click(button('WSL'))
+    assert.match(document.querySelector('.dsh-ssh__form-footer').textContent, /不安装 DSH.*Native/)
     await click(button('添加到工作区'))
     assert.deepEqual(fixture.calls.find(call => call.method === 'add').input, { target: { kind: 'wsl', distribution: 'Ubuntu-22.04', remotePath: '/home/test/project' }, mode: 'light' })
     assert.match(document.querySelector('.dsh-ssh__connection').textContent, /轻量.*本机 Agent/)
-    assert.match(document.querySelector('.dsh-ssh__form-footer').textContent, /不安装 DSH.*Native/)
+    assert.equal(document.querySelector('.dsh-ssh__new'), null)
   } finally { await fixture.dispose() }
 })
 
@@ -382,7 +386,7 @@ test('disconnect keeps a saved folder, changes its state and offers explicit rec
     await click(button('断开 saved-project'))
     assert.equal(fixture.calls.some(call => call.method === 'remove'), false)
     assert.equal(document.querySelector('.dsh-ssh__connection').dataset.connectionState, 'disconnected')
-    assert.equal(button('在当前窗口打开 saved-project').disabled, true)
+    assert.equal(document.querySelector('[aria-label="在当前窗口打开 saved-project"]'), null, 'offline projects offer Connect, not an unusable Open action')
     assert.match(document.querySelector('.dsh-ssh__notice').textContent, /挂载不卸载/)
     await click(button('连接 saved-project'))
     assert.equal(document.querySelector('.dsh-ssh__connection').dataset.connectionState, 'connected')
@@ -416,6 +420,7 @@ test('a failed full-to-light connection preserves the full project and allows mo
   try {
     await click(button('远程工作区')); await click(button('设置 full-project 的连接模式'))
     await select('mode', 'light')
+    assert.match(document.querySelector('.dsh-ssh__scope').textContent, /Agent 与模型：本机 DSH/)
     const mount = document.querySelector('input[id$="-mount"]')
     assert.equal(mount.value, '', 'a remote POSIX path must never be mistaken for a local mount path')
     await input('mount', 'Z:\\mapped-project')
@@ -498,5 +503,56 @@ test('Skill sync defaults to missing items and requires explicit selection and o
     assert.equal(button('同步所选 0 项').disabled, true)
     await click(button('返回工作区'))
     assert.ok(document.querySelector('.dsh-ssh__saved'))
+  } finally { await fixture.dispose() }
+})
+
+test('saved projects open on the dashboard and a second directory reuses the selected device without credentials', async () => {
+  const row = { id: 'full-ssh', workspaceId: 'remote-one', title: 'API', mode: 'full', registered: true, connectionState: 'connected', target: { kind: 'ssh', host: 'demo-host', user: 'developer', port: 2222, auth: 'key', identityFile: '~/.ssh/demo', remotePath: '/srv/api' } }
+  const fixture = await mount({ initialSaved: [row] })
+  try {
+    await click(button('远程工作区'))
+    assert.equal(document.querySelector('.dsh-ssh__new'), null)
+    assert.match(document.querySelector('.dsh-ssh__saved').textContent, /1 个已连接/)
+    await click(button('添加同设备项目'))
+    assert.equal(document.querySelector('input[id$="-host"]').value, 'demo-host')
+    assert.equal(document.querySelector('input[id$="-port"]').value, '2222')
+    assert.equal(document.querySelector('input[id$="-identityFile"]').value, '~/.ssh/demo')
+    assert.equal(document.querySelector('input[id$="-path"]').value, '/srv')
+    assert.equal(document.querySelector('input[id$="-title"]').value, '')
+    assert.equal(document.querySelector('input[id$="-passphrase"]').value, '')
+    await input('path', '/srv/worker')
+    await click(button('添加到工作区'))
+    const request = fixture.calls.find(call => call.method === 'add').input
+    assert.equal(request.target.remotePath, '/srv/worker')
+    assert.equal(request.credentials, undefined)
+    assert.equal(fixture.saved[0].target.remotePath, '/srv/api')
+    assert.equal(document.querySelector('.dsh-ssh__new'), null)
+  } finally { await fixture.dispose() }
+})
+
+test('failed native navigation reports the failure and keeps connection actions usable', async () => {
+  const row = { id: 'full', workspaceId: 'remote-one', title: 'API', mode: 'full', registered: true, connectionState: 'connected', target: { kind: 'wsl', distribution: 'Ubuntu', remotePath: '/srv/api' } }
+  const fixture = await mount({ initialSaved: [row], navigate: async () => { throw new Error('Remote workspace stream unavailable') } })
+  try {
+    await click(button('远程工作区'))
+    await click(button('在当前窗口打开 API'))
+    assert.match(document.querySelector('[role="alert"]').textContent, /无法打开项目.*stream unavailable/)
+    assert.ok(document.querySelector('.dsh-ssh__saved'))
+    assert.equal(button('断开 API').disabled, false)
+    assert.deepEqual(fixture.opened, [])
+  } finally { await fixture.dispose() }
+})
+
+test('a missing full registration offers explicit re-add with the original directory instead of a misleading open action', async () => {
+  const row = { id: 'missing', workspaceId: 'remote-old', title: 'API', mode: 'full', registered: false, connectionState: 'error', connectionError: '远端项目登记已不存在', target: { kind: 'wsl', distribution: 'Ubuntu', remotePath: '/srv/api' } }
+  const fixture = await mount({ initialSaved: [row] })
+  try {
+    await click(button('远程工作区'))
+    assert.equal(document.querySelector('button[aria-label="在当前窗口打开 API"]'), null)
+    assert.match(document.querySelector('.dsh-ssh__connection').textContent, /旧会话保留在远端/)
+    await click(button('重新添加 API 的目录'))
+    assert.equal(document.querySelector('input[id$="-path"]').value, '/srv/api')
+    assert.equal(document.querySelector('input[id$="-title"]').value, 'API')
+    assert.equal(fixture.calls.filter(call => call.method === 'add').length, 0, 'opening recovery never writes before explicit add')
   } finally { await fixture.dispose() }
 })

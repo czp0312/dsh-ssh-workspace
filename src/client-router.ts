@@ -13,6 +13,7 @@ class Queue<T> {
   push(value: T): void { if (this.values.length >= 4096) { this.fail(new Error('DSH stream consumer is too slow')); return }; this.values.push(value); this.wake?.(); this.wake = undefined }
   fail(error: unknown): void { this.error = error; this.wake?.(); this.wake = undefined }
   async next(signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted()
     while (!this.values.length) {
       signal.throwIfAborted(); if (this.error) throw this.error
       await new Promise<void>(resolve => { const wake = () => { signal.removeEventListener('abort', wake); resolve() }; this.wake = wake; signal.addEventListener('abort', wake, { once: true }); if (signal.aborted) wake() })
@@ -57,7 +58,7 @@ class NativeMux {
       while (true) { const frame = await inbox.next(signal); if (frame.type === 'item') yield frame.value; else if (frame.type === 'error') throw streamError(frame.error); else return }
     } finally { stopped = true; send({ type: 'cancel' }); this.inboxes.delete(id); void iterator?.return?.() }
   }
-  close(): void { this.socket?.close(); this.ready = undefined; for (const inbox of this.inboxes.values()) inbox.fail(new Error('Router disposed')); this.inboxes.clear() }
+  close(): void { this.socket?.close(); this.ready = undefined; for (const inbox of this.inboxes.values()) inbox.fail(carrierError('Remote workspace router replaced')); this.inboxes.clear() }
 }
 const streamError = (failure: any): Error => Object.assign(new Error(failure?.message || 'Remote DSH stream failed'), { dshRemoteStreamFailure: { kind: 'remote', code: failure?.code || 'internal', details: failure?.details || {} } })
 const carrierError = (message: string): Error => Object.assign(new Error(message), { dshRemoteStreamFailure: { kind: 'carrier' } })
@@ -68,6 +69,12 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
   const originalCall = rpc.call.bind(rpc)
   const originalMethod = rpc.call
   const originalOpen = rpc.open
+  // DSH 0.2.2-rc.1's Gateway owns the pre-plugin WebSocket mux. Its native
+  // reconnect sink stops touching that mux once rpc.open is provided. On a
+  // late install/hot replacement, retire it once so existing controllers
+  // subscribe through this router. Capture only an already-mounted controller;
+  // a normal cold start must not interrupt native Session restoration.
+  const preexistingMux = ctx.get('workspaces') ? ctx.get('remote')?.streams : undefined
   const localMux = new NativeMux(path => ctx.connection.openWebSocket!(path))
   const localOpen: Open = originalOpen?.bind(rpc) ?? ((_channel, endpoint, payload, signal, uplink) => localMux.open(endpoint, payload, signal, uplink))
   const lifetime = new AbortController()
@@ -91,7 +98,7 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
     const next: string[] = status.sources ?? []
     records = status.workspaces ?? []
     onCatalog?.(records)
-    const key = JSON.stringify([next, records.filter(row => row.backendId).map(row => [row.backendId, row.workspaceId])])
+    const key = JSON.stringify([next, records.filter(row => row.backendId).map(row => [row.backendId, row.workspaceId, row.registered])])
     if (force || key !== catalog) {
       const connectedCatalog = catalog !== ''
       catalog = key; sources = next
@@ -101,6 +108,7 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
     }
   }
   const initialized = refresh().catch(error => { if (!lifetime.signal.aborted) console.error('Remote backend catalog:', error instanceof Error ? error.message : 'unavailable') })
+  void initialized.then(() => { if (!lifetime.signal.aborted && typeof preexistingMux?.reconnect === 'function') preexistingMux.reconnect() })
   async function remoteCall(source: string, endpoint: string, payload: any, signal?: AbortSignal): Promise<any> {
     const translated = translateIds(payload, source, false)
     if (endpoint === '$events/result' && eventClients.has(source)) translated.args.clientId = eventClients.get(source)
@@ -225,7 +233,7 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
       // Cached folders remain visible when manually disconnected. Only enabled
       // sources receive live subscriptions, so polling cannot undo a disconnect.
       const visibleSources = [...new Set([...sources, ...records.filter(record => record.backendId).map(record => record.backendId as string)])]
-      for (const source of visibleSources) states.set(source, { ...empty(), items: records.filter(record => record.backendId === source).map(record => translateIds(record.workspace, source, true)) })
+      for (const source of visibleSources) states.set(source, { ...empty(), items: records.filter(record => record.backendId === source && record.registered !== false).map(record => translateIds(record.workspace, source, true)) })
       const pump = async (source: string) => {
         let attempt = 0
         while (!combined.aborted) {
@@ -278,7 +286,7 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
             continue
           }
           const state = states.get(item.source) ?? empty(); const frame = item.value
-          const allowed = (workspaceId: string) => !item.source || records.some(record => record.backendId === item.source && record.workspaceId === workspaceId)
+          const allowed = (workspaceId: string) => !item.source || records.some(record => record.backendId === item.source && record.workspaceId === workspaceId && record.registered !== false)
           if (frame.type === 'baseline' || frame.type === 'replace') states.set(item.source, { ...frame.value, items: frame.value.items.filter((row: any) => allowed(row.workspaceId)) })
           else if (frame.type === 'upsert' && allowed(frame.workspace.workspaceId)) state.items = [...state.items.filter((row: any) => row.workspaceId !== frame.workspace.workspaceId), frame.workspace]
           else if (frame.type === 'remove') state.items = state.items.filter((row: any) => row.workspaceId !== frame.workspaceId)
@@ -306,5 +314,13 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
       if (!lifetime.signal.aborted) onCatalog?.(records.map(record => ({ ...record, online: false, connectionState: 'disconnected' })))
     }).finally(() => { polling = false })
   }, 5_000)
-  return { refresh, dispose() { lifetime.abort(); clearInterval(timer); rpc.call = originalMethod; rpc.open = originalOpen; localMux.close(); restorations.forEach(restore => restore()) } }
+  return { refresh, dispose() {
+    // DSH retains its native controllers when a third-party plugin hot reloads.
+    // A plain AbortError permanently terminates their RemoteSnapshotStreams,
+    // leaving the sidebar frozen even after the replacement router connects.
+    // Classify retirement as a carrier change so subscriptions can be reopened.
+    rpc.call = originalMethod; rpc.open = originalOpen
+    lifetime.abort(carrierError('Remote workspace router replaced'))
+    clearInterval(timer); localMux.close(); restorations.forEach(restore => restore())
+  } }
 }

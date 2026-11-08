@@ -17,7 +17,7 @@ npm pack
 从仓库根目录把本地包安装到测试 profile：
 
 ```sh
-dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.0.tgz
+dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.1.tgz
 ```
 
 测试前应通过独立 `DSH_HOME` 配置隔离数据目录，并启动同名 profile。不要直接修改正在使用的桌面 profile 来做安装试验。
@@ -52,6 +52,9 @@ dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.0.tgz
 - 路由仅依赖 `connection`，必须先于原生控制器订阅安装；界面、导航和上传钩子分别等待所需服务，不能让 UI 依赖推迟整个路由启动。
 - 客户端模块清单、插件管理和访问控制始终使用本机宿主；不能随着当前远程项目切换这些服务。初次读取项目目录也不应打断原生会话恢复。
 - 每个合并的 Session 控制流只发送一份初始快照，再发送增量。目录登记或后端来源变化时，以可重试的传输错误结束旧订阅，重新建立快照，不重放业务请求。
+- 插件热更新时，路由销毁必须携带 `dshRemoteStreamFailure.kind = carrier`。普通 `AbortError` 会让宿主的原生订阅永久停止。测试使用 DSH 实际 `RemoteStream` 验证项目流与 Session 控制流的恢复。
+- DSH 0.2.2-rc.1 尚未提供统一重建所有原生订阅的公开入口。对于在原生控制器启动后才激活的路由，兼容适配器会重连既有 `remote.streams` mux 一次，以便旧订阅转入新路由；只在已有 `workspaces` 服务时使用，冷启动不触发。此字段属于版本相关实现，升级 DSH 时须重新检查。
+- 实机验收需覆盖：页面打开后的首次添加、同后端第二目录、热更新后继续增加目录、断开与恢复、冷启动保留目录和两种模式并存。不能只在浏览器打开前预填远程记录。
 
 DSH 当前未提供项目标题装饰插槽，远程图标由独立 DOM 适配器添加，按工作区 ID 匹配而非名称。卸载时清理图标，不修改原生项目名称。该适配器需要随 DSH 界面升级重新验证。
 
@@ -83,6 +86,8 @@ DSH 当前未提供项目标题装饰插槽，远程图标由独立 DOM 适配�
 本机 broker 保管远端认证 Cookie 和启动令牌，不返回给插件 UI。`backend.json` 与 `backend.log` 可能含敏感令牌，不能原样公开。远端使用用户自己的 `~/.dsh`，不复制本机模型凭据或插件。
 
 本机默认登记文件位于 `<DSH_HOME>/ssh-workspaces.json` 和 `<DSH_HOME>/ssh-backends.json`，未设置 `DSH_HOME` 时使用用户的 `~/.dsh`。轻量与全量记录分开保存；移除登记仍保留旧会话所需的路由。
+
+全量连接建立与定期健康检查还读取原生 `workspace/follow` 的初始快照，核对保存的工作区身份和目录；后端在线不等于项目仍已登记。缺失或路径变化时标记为未登记，普通重连拒绝隐式重建。用户显式重新添加后，若产生新工作区 ID，旧记录保留为 tombstone，不迁移 Session。并发添加会使旧健康快照失效，避免刚创建的项目被误标为缺失。
 
 ## 实机验证
 

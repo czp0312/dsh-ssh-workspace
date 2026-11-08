@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-workspaces",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "SSH, WSL and Docker projects in the native DSH sidebar, with lightweight/full modes and selective Skill sync",
   "type": "module",
   "license": "MIT",
@@ -83,6 +83,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-api-gateway": "0.2.2-rc.1",
     "@deepseek-ai/dsh-client-connection": "0.2.2-rc.1",
     "@deepseek-ai/dsh-sandbox": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",

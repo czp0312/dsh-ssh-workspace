@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { installBackendRouter } from '../src/client-router.js'
 import { remoteId } from '../src/backend-protocol.js'
+import { RemoteStream, RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 
 const success = (value: unknown) => ({ ok: true, value })
 const abort = (signal: AbortSignal): Promise<never> => new Promise((_, reject) => {
@@ -10,7 +11,7 @@ const abort = (signal: AbortSignal): Promise<never> => new Promise((_, reject) =
   if (signal.aborted) stop()
 })
 
-function fixture(options: { localControlReady?: Promise<void>; offlineControl?: boolean; lateServices?: boolean } = {}) {
+function fixture(options: { localControlReady?: Promise<void>; offlineControl?: boolean; lateServices?: boolean; mountedNative?: boolean } = {}) {
   const native = { workspaceId: 'local-workspace', title: 'Local', path: 'C:\\project', sessionIds: ['local-session'] }
   const remote = { workspaceId: 'remote-workspace', title: 'Remote', path: '/project', sessionIds: ['same-session'] }
   const records: any[] = [{ backendId: 'host-a', workspaceId: remoteId('host-a', remote.workspaceId), workspace: remote }]
@@ -23,6 +24,7 @@ function fixture(options: { localControlReady?: Promise<void>; offlineControl?: 
   const streams = new Map<string, any[]>()
   let count = 0
   let reconnects = 0
+  let gatewayRestarts = 0
   let broken = false
   let enabled = true
   const navigation: any = { startSession() {}, openSession() {}, openWorkspace() {} }
@@ -67,11 +69,53 @@ function fixture(options: { localControlReady?: Promise<void>; offlineControl?: 
     await abort(signal)
   }
   const rpc = { call: originalCall, open: originalOpen }
-  const context = { connection: { rpc, openWebSocket() { throw new Error('Native logical streams should be retained') }, reconnect() { reconnects++ } }, get(name: string) { return name === 'uiWorkspace' ? navigation : name === 'fileUpload' ? upload : undefined }, emit() {}, ...(options.lateServices ? { inject(services: string[], setup: (ctx: any) => () => void) { pendingServices.set(services[0]!, setup) } } : {}) }
-  const router = installBackendRouter(context)!
+  const context = { connection: { rpc, openWebSocket() { throw new Error('Native logical streams should be retained') }, reconnect() { reconnects++ } }, get(name: string) { return name === 'uiWorkspace' ? navigation : name === 'fileUpload' ? upload : name === 'workspaces' && options.mountedNative ? {} : name === 'remote' ? { streams: { reconnect() { gatewayRestarts++ } } } : undefined }, emit() {}, ...(options.lateServices ? { inject(services: string[], setup: (ctx: any) => () => void) { pendingServices.set(services[0]!, setup) } } : {}) }
+  let router = installBackendRouter(context)!
+  const reload = () => { router.dispose(); router = installBackendRouter(context)!; return router }
   const ready = () => router.refresh()
-  return { rpc, router, ready, navigation, upload, uploads, calls, records, eventFrames, controlFrames, provideServices() { for (const setup of pendingServices.values()) serviceCleanup.push(setup(context)); pendingServices.clear() }, withdrawServices() { serviceCleanup.splice(0).forEach(dispose => dispose()) }, get reconnects() { return reconnects }, fail() { broken = true }, disconnect() { enabled = false; for (const row of records) row.disconnected = true } }
+  return { rpc, get router() { return router }, reload, ready, navigation, upload, uploads, calls, records, eventFrames, controlFrames, provideServices() { for (const setup of pendingServices.values()) serviceCleanup.push(setup(context)); pendingServices.clear() }, withdrawServices() { serviceCleanup.splice(0).forEach(dispose => dispose()) }, get reconnects() { return reconnects }, get gatewayRestarts() { return gatewayRestarts }, fail() { broken = true }, disconnect() { enabled = false; for (const row of records) row.disconnected = true } }
 }
+
+test('late activation retires the pre-router native carrier once without resetting a cold startup', async () => {
+  const cold = fixture(); const late = fixture({ mountedNative: true })
+  try {
+    await Promise.all([cold.ready(), late.ready()])
+    assert.equal(cold.gatewayRestarts, 0)
+    assert.equal(late.gatewayRestarts, 1)
+    await late.router.refresh()
+    assert.equal(late.gatewayRestarts, 1, 'status polling cannot repeatedly interrupt native streams')
+  } finally { cold.router.dispose(); late.router.dispose() }
+})
+
+for (const endpoint of ['workspace/follow', 'session/control']) test(`DSH native ${endpoint} survives plugin hot replacement and accepts the next catalog`, async () => {
+  const f = fixture()
+  let recoveries = 0
+  // Use the real DSH supervisor. The structural-to-class conversion is the
+  // Gateway's normalizeConnectionStream boundary for plugin/worker carriers.
+  const supervisor = new RemoteStream<any>({ generation: { getSnapshot: () => ({ id: 1, host: { home: '/local' } }), subscribe: () => () => {} } }, {
+    name: endpoint,
+    async *open(signal) {
+      try { yield* f.rpc.open('/api', endpoint, { args: {} }, signal) }
+      catch (error: any) { if (error.dshRemoteStreamFailure?.kind === 'carrier') throw new RemoteStreamCarrierError(error.message); throw error }
+    },
+    ended: () => new RemoteStreamCarrierError('Stream ended'),
+    carrierFailed: () => { recoveries++ },
+  })
+  const stream = supervisor[Symbol.asyncIterator]()
+  try {
+    await f.ready()
+    const initial = (await stream.next()).value!
+    initial.accept()
+    f.reload()
+    await f.ready()
+    const replacement = (await stream.next()).value!
+    assert.equal(replacement.generation, 2)
+    assert.equal(replacement.value.type, 'baseline')
+    replacement.accept()
+    assert.equal(recoveries, 1)
+    if (endpoint === 'workspace/follow') assert.ok(replacement.value.value.items.some((row: any) => row.workspaceId === remoteId('host-a', 'remote-workspace')))
+  } finally { await supervisor.dispose(); f.router.dispose() }
+})
 
 test('router isolates local and remote calls across project switches and never falls back on a remote failure', async () => {
   const f = fixture()
@@ -129,6 +173,21 @@ test('remote binary results survive the broker envelope and duplicate Session id
     assert.equal(session.value.sessionId, remoteId('host-a', 'same-session'))
     assert.equal(f.calls.at(-1).payload.payload.args.request.sessionId, 'new-uuid')
   } finally { f.router.dispose() }
+})
+
+test('missing native registrations are excluded from both cached and live sidebar frames', async () => {
+  const f = fixture()
+  const controller = new AbortController()
+  try {
+    f.records[0].registered = false
+    await f.ready()
+    const stream = f.rpc.open('/api', 'workspace/follow', { args: {} }, controller.signal)[Symbol.asyncIterator]()
+    for (let i = 0; i < 2; i++) {
+      const frame = (await stream.next()).value
+      assert.ok(frame.value.items.every((row: any) => row.workspaceId === 'local-workspace'))
+    }
+    await stream.return?.()
+  } finally { controller.abort(); f.router.dispose() }
 })
 
 test('native sidebar merges only registered remote folders and refreshes for a second folder on the same host', async () => {

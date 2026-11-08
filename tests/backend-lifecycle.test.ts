@@ -12,27 +12,44 @@ class FakeWire extends BackendWire {
   calls: string[] = []
   healthy = true
   closed = false
-  constructor() { super('http://127.0.0.1:1', 'synthetic-cookie') }
+  onSnapshot?: () => Promise<void>
+  constructor(readonly native: Map<string, any>) { super('http://127.0.0.1:1', 'synthetic-cookie') }
   override async rpc(endpoint: string, payload: any): Promise<any> {
     this.calls.push(endpoint)
     if (this.closed) throw new Error('wire closed')
     const request = payload.args.request
-    if (endpoint === 'workspace/create') return { result: { ok: true, value: { workspace: { workspaceId: 'id-' + request.path.slice(1), path: request.path, title: 'remote', sessionIds: ['original-history'] } } }, attachments: [] }
+    if (endpoint === 'workspace/create') {
+      let workspace = [...this.native.values()].find(row => row.path === request.path)
+      if (!workspace) {
+        workspace = { workspaceId: 'id-' + request.path.slice(1), path: request.path, title: 'remote', sessionIds: ['original-history'] }
+        this.native.set(workspace.workspaceId, workspace)
+      }
+      return { result: { ok: true, value: { workspace } }, attachments: [] }
+    }
+    if (endpoint === 'workspace/rename') this.native.get(request.workspaceId).title = request.title
     return { result: { ok: true, value: {} }, attachments: [] }
   }
   override async checkHealth(): Promise<void> { if (!this.healthy) { this.isStale = true; throw new Error('network lost') } }
+  override async open(endpoint: string): Promise<string> { assert.equal(endpoint, 'workspace/follow'); return 'registration-snapshot' }
+  override async poll(): Promise<any[]> {
+    const items = structuredClone([...this.native.values()])
+    await this.onSnapshot?.()
+    return [{ type: 'item', value: { type: 'baseline', value: { items } } }]
+  }
+  override cancel(): void {}
   override close(): void { this.closed = true; super.close() }
 }
 
 class TestBackends extends RemoteBackends {
   starts = 0
   wires: FakeWire[] = []
+  native = new Map<string, any>()
   tunnelCloses = 0
   onStart?: (signal: AbortSignal) => Promise<void>
   protected override async createConnection(_target: RemoteTarget, signal: AbortSignal): Promise<RunningBackend> {
     this.starts++
     await this.onStart?.(signal)
-    const wire = new FakeWire(); this.wires.push(wire)
+    const wire = new FakeWire(this.native); this.wires.push(wire)
     return { wire, tunnel: { close: async () => { this.tunnelCloses++ } } }
   }
 }
@@ -71,6 +88,7 @@ test('shared full backends disconnect together, persist the pause and retain the
   const json = JSON.parse(await readFile(f.file, 'utf8'))
   assert.ok(json.projects.every((row: any) => row.disconnected === true))
   const reloaded = new TestBackends(f.file, f.transport)
+  reloaded.native = f.backend.native
   try {
     await reloaded.load()
     await assert.rejects(reloaded.wire(b.backendId), /已断开/)
@@ -123,9 +141,49 @@ test('switch matching prefers the current backend namespace over a duplicated le
   json.projects.unshift({ ...json.projects[0], id: 'legacy-duplicate', backendId: 'legacy-source', workspaceId: 'dsh-remote:legacy-source:id-project-a' })
   await writeFile(file, JSON.stringify(json))
   const reloaded = new TestBackends(file, transport)
+  reloaded.native = backend.native
   try {
     await reloaded.load()
     assert.equal(reloaded.findTarget(target)?.id, original.id)
     assert.equal((await reloaded.add({ target })).id, original.id)
   } finally { await reloaded.dispose() }
+})
+
+test('removed native registrations report unavailable; explicit re-add preserves the old identity without migrating history', async t => {
+  const { backend, file } = await fixture(t)
+  const original = await backend.add({ target })
+  const sibling = await backend.add({ target: { ...target, remotePath: '/project-b' } })
+  backend.native.delete(original.workspace.workspaceId)
+  await backend.checkHealth(new AbortController().signal)
+  const missing = backend.list().find(row => row.id === original.id)!
+  assert.equal(missing.registered, false)
+  assert.equal(missing.connectionState, 'error')
+  assert.equal(missing.online, false)
+  assert.throws(() => backend.workspaceOperation(original.id), /重新添加目录/)
+  assert.equal(backend.list().find(row => row.id === sibling.id)!.online, true)
+  await assert.rejects(backend.reconnect(original.id), /重新添加目录/)
+  assert.equal(backend.native.has(original.workspace.workspaceId), false, 'reconnect never recreates a deleted workspace implicitly')
+  backend.native.set('replacement-id', { workspaceId: 'replacement-id', path: target.remotePath, title: original.title, sessionIds: [] })
+  const restored = await backend.add({ target, title: original.title })
+  assert.notEqual(restored.id, original.id)
+  assert.notEqual(restored.workspaceId, original.workspaceId)
+  assert.deepEqual(restored.workspace.sessionIds, [])
+  assert.equal(backend.list().filter(row => row.target.remotePath === target.remotePath).length, 1)
+  const retained = JSON.parse(await readFile(file, 'utf8')).projects.find((row: any) => row.id === original.id)
+  assert.ok(retained.removedAt)
+  assert.equal(retained.workspaceId, original.workspaceId)
+  assert.deepEqual(retained.workspace.sessionIds, ['original-history'])
+})
+
+test('a stale health snapshot cannot mark a concurrently added project as missing', async t => {
+  const { backend } = await fixture(t)
+  await backend.add({ target })
+  const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  backend.wires[0]!.onSnapshot = async () => { ready.resolve(); await release.promise }
+  const checking = backend.checkHealth(new AbortController().signal)
+  await ready.promise
+  const added = await backend.add({ target: { ...target, remotePath: '/project-b' } })
+  release.resolve()
+  await checking
+  assert.equal(backend.list().find(row => row.id === added.id)!.registered, true)
 })
