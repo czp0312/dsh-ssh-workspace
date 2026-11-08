@@ -303,6 +303,27 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     },
     loadSkills,
     closeSkills: (): void => { if (state.pending.includes('skills/apply')) return; cancel('skills/preview'); update({ skills: null }); setError('skills', null) },
+    escape: (): boolean => {
+      if (state.confirmRemove) { update({ confirmRemove: null }); return true }
+      if (state.reauth) { if (!mutationPending(state)) update({ reauth: null }); return true }
+      if (state.skills) {
+        if (state.pending.includes('skills/apply')) return true
+        cancel('skills/preview')
+        update({ skills: null })
+        setError('skills', null)
+        return true
+      }
+      if (state.directory) { update({ directory: null }); return true }
+      if (state.view === 'add' && (state.status?.workspaces.length ?? 0) > 0) {
+        if (mutationPending(state)) return true
+        cancelForm()
+        patchDraft('ssh', { password: '', passphrase: '' })
+        patchDraft('docker', { password: '', passphrase: '' })
+        update({ view: 'projects', skills: null })
+        return true
+      }
+      return false
+    },
     selectSkill: (id: string): void => {
       const form = state.skills
       if (!form?.preview || state.pending.includes('skills/apply')) return
@@ -480,34 +501,38 @@ function ProjectRow({ manager, state, item, connection, connectionIndex }: Injec
   const managedByGroup = !!connection
   const status = connecting ? 'connecting' : disconnecting ? 'disconnected' : connectionState(item)
   return <li className="dsh-ssh__connection" data-connection-state={status} data-project-id={item.id} aria-busy={connecting || disconnecting || state.pending.includes(`switch:${item.id}`) || state.pending.includes(`remove:${item.id}`)}>
-                <div className="dsh-ssh__connection-heading"><span className="dsh-ssh__connection-symbol" data-connection-state={status}><ConnectionIcon /></span><strong title={item.title}>{item.title}</strong><span className="dsh-ssh__kind" data-mode={item.mode ?? 'light'}>{item.mode === 'full' ? '全量' : '轻量'}</span></div>
-                {item.target.kind === 'ssh' && item.target.user && <p className="dsh-ssh__project-user">用户 · {item.target.user}</p>}
-                {item.target.kind === 'wsl' && item.target.user && <p className="dsh-ssh__project-user">用户 · {item.target.user}</p>}
-                {item.target.kind === 'docker' && item.target.user && <p className="dsh-ssh__project-user">容器用户 · {item.target.user}</p>}
-                <p className="dsh-ssh__path" title={item.target.remotePath}>{item.target.remotePath}</p>
-                <span className="dsh-ssh__registration" data-connection-state={status} role="status">{disconnecting ? '正在断开' : CONNECTION_LABELS[status]} · {item.mode === 'full' ? '远程 DSH 后端' : '本机 Agent / 远程命令'}</span>
-                {connectionIndex !== undefined && <p className="dsh-ssh__hint">使用共享连接 {connectionIndex + 1} · {connectionLabel(item)}</p>}
-                {!item.registered && <p className="dsh-ssh__hint">{item.mode === 'full' ? '远端登记已变化。重新添加会恢复目录入口，旧会话保留在远端，不自动关联到新入口。' : '尚未登记，连接后恢复侧栏入口。'}</p>}
-                {status === 'error' && <p className="dsh-ssh__connection-error">{item.connectionError || '连接不可用，请重新连接。'}</p>}
-                {state.confirmRemove === item.id ? <div className="dsh-ssh__remove-confirm">
-                  <p>移除此模式的工作区登记？文件和会话历史保留。需要暂停连接时请使用“断开”。</p>
-                  <div className="dsh-ssh__actions">
-                    <button type="button" className="dsh-ssh__button dsh-ssh__button--danger" onClick={() => manager.remove(item.id)} disabled={busy}>{state.pending.includes(`remove:${item.id}`) ? '移除中…' : '确认移除'}</button>
-                    <button type="button" className="dsh-ssh__button" onClick={() => manager.confirmRemove(null)} disabled={busy}>取消</button>
-                  </div>
-                </div> : <div className="dsh-ssh__connection-actions">
-                  {status === 'connected' && manager.canOpen() && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || !item.registered} title="打开此模式的会话输入页；继续旧对话请从侧栏选择" onClick={() => { void manager.openWorkspace(item.workspaceId) }} aria-label={`在当前窗口打开 ${item.title}`}>{opening ? '打开中…' : '打开项目'}</button>}
-                  {item.mode === 'full' && !item.registered ? <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.newProject(item.id, true)} aria-label={`重新添加 ${item.title} 的目录`}>重新添加目录</button> : !managedByGroup && status !== 'connected' && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`连接 ${item.title}`}>{connecting ? '连接中…' : '连接'}</button>}
-                  {!managedByGroup && (status === 'connected' || status === 'connecting') && <button type="button" className="dsh-ssh__text-button" disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(item.id)} aria-label={`断开 ${item.title}`}>断开</button>}
-                  <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.editConnection(item.id)} aria-label={`设置 ${item.title} 的连接模式`}>项目模式</button>
-                  {item.mode === 'full' && <button type="button" className="dsh-ssh__text-button" disabled={busy || status !== 'connected'} onClick={() => manager.loadSkills(item.id)} aria-label={`同步本机 Skill 到 ${item.title}`}>同步 Skill</button>}
-                  <details className="dsh-ssh__more"><summary aria-label={`${item.title} 的更多操作`}>更多</summary><div className="dsh-ssh__more-actions">
-                    {!managedByGroup && status === 'connected' && <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`重新连接 ${item.title}`}>重新连接</button>}
-                    <button type="button" className="dsh-ssh__text-button dsh-ssh__remove" disabled={busy} onClick={() => manager.confirmRemove(item.id)} aria-label={`移除 ${item.title} 的登记`}>移除登记</button>
-                  </div></details>
-                </div>}
-                <ConnectionSettings manager={manager} state={state} item={item} />
-              </li>
+    <div className="dsh-ssh__connection-heading">
+      <span className="dsh-ssh__connection-symbol" data-connection-state={status}><ConnectionIcon /></span>
+      <span className="dsh-ssh__connection-title"><strong title={item.title}>{item.title}</strong><span className="dsh-ssh__kind" data-mode={item.mode ?? 'light'}>{item.mode === 'full' ? '全量' : '轻量'}</span></span>
+      <span className="dsh-ssh__registration" data-connection-state={status} role="status">{disconnecting ? '正在断开' : CONNECTION_LABELS[status]}{item.mode === 'full' ? ' · 远程 DSH 后端' : ' · 本机 Agent'}</span>
+    </div>
+    <div className="dsh-ssh__connection-details">
+      <p className="dsh-ssh__path" title={item.target.remotePath}>{item.target.remotePath}</p>
+      {item.target.kind === 'docker' && item.target.user && <p className="dsh-ssh__project-user">容器用户 · {item.target.user}</p>}
+      {item.target.kind !== 'docker' && item.target.user && <p className="dsh-ssh__project-user">用户 · {item.target.user}</p>}
+      {connectionIndex !== undefined && <p className="dsh-ssh__hint">共享连接 {connectionIndex + 1} · {connectionLabel(item)}</p>}
+      {!item.registered && <p className="dsh-ssh__hint">{item.mode === 'full' ? '远端登记已变化。重新添加会恢复目录入口，旧会话保留在远端，不自动关联到新入口。' : '尚未登记，连接后恢复侧栏入口。'}</p>}
+      {status === 'error' && <p className="dsh-ssh__connection-error">{item.connectionError || '连接不可用，请重新连接。'}</p>}
+    </div>
+    {state.confirmRemove === item.id ? <div className="dsh-ssh__remove-confirm" role="group" aria-label={`移除 ${item.title}`}>
+      <p>移除此模式的工作区登记？文件和会话历史保留。需要暂停连接时请使用“断开”。</p>
+      <div className="dsh-ssh__actions">
+        <button type="button" className="dsh-ssh__button dsh-ssh__button--danger" onClick={() => manager.remove(item.id)} disabled={busy}>{state.pending.includes(`remove:${item.id}`) ? '移除中…' : '确认移除'}</button>
+        <button type="button" className="dsh-ssh__button" onClick={() => manager.confirmRemove(null)} disabled={busy}>取消</button>
+      </div>
+    </div> : <div className="dsh-ssh__connection-actions">
+      {status === 'connected' && manager.canOpen() && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || !item.registered} title="打开此模式的会话输入页；继续旧对话请从侧栏选择" onClick={() => { void manager.openWorkspace(item.workspaceId) }} aria-label={`在当前窗口打开 ${item.title}`}>{opening ? '打开中…' : '打开项目'}</button>}
+      {item.mode === 'full' && !item.registered ? <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.newProject(item.id, true)} aria-label={`重新添加 ${item.title} 的目录`}>重新添加目录</button> : !managedByGroup && status !== 'connected' && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`连接 ${item.title}`}>{connecting ? '连接中…' : '连接'}</button>}
+      {!managedByGroup && (status === 'connected' || status === 'connecting') && <button type="button" className="dsh-ssh__text-button" disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(item.id)} aria-label={`断开 ${item.title}`}>断开</button>}
+      <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.editConnection(item.id)} aria-label={`设置 ${item.title} 的连接模式`}>项目模式</button>
+      {item.mode === 'full' && <button type="button" className="dsh-ssh__text-button" disabled={busy || status !== 'connected'} onClick={() => manager.loadSkills(item.id)} aria-label={`同步本机 Skill 到 ${item.title}`}>同步 Skill</button>}
+      <details className="dsh-ssh__more"><summary aria-label={`${item.title} 的更多操作`} title="更多操作">⋯</summary><div className="dsh-ssh__more-actions">
+        {!managedByGroup && status === 'connected' && <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`重新连接 ${item.title}`}>重新连接</button>}
+        <button type="button" className="dsh-ssh__text-button dsh-ssh__remove" disabled={busy} onClick={() => manager.confirmRemove(item.id)} aria-label={`移除 ${item.title} 的登记`}>移除登记</button>
+      </div></details>
+    </div>}
+    <ConnectionSettings manager={manager} state={state} item={item} />
+  </li>
 }
 
 function ConnectionSettings({ manager, state, item, connection = false }: Injected & { state: Snapshot; item: WorkspaceView; connection?: boolean }) {
@@ -518,22 +543,28 @@ function ConnectionSettings({ manager, state, item, connection = false }: Inject
   const switching = form.mode !== (item.mode ?? 'light')
   const ssh = sshTarget(item.target)
   return <form className="dsh-ssh__credentials" aria-label={form.connection ? `${item.title} 的连接认证` : `${item.title} 的连接设置`} onSubmit={event => { event.preventDefault(); manager.reconnectWithCredentials() }}>
-                  {form.connection ? <p className="dsh-ssh__hint">此认证用于共享的全量后端连接，影响该连接下的所有项目，不修改项目模式。</p> : <>
-                  <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mode`}>此项目的运行模式<select id={`saved-${item.id}-mode`} value={form.mode} onChange={event => manager.changeConnection('mode', event.target.value)} disabled={busy}><option value="light">轻量模式</option><option value="full">全量模式</option></select></label>
-                  <div className="dsh-ssh__scope"><strong>{form.mode === 'full' ? '执行与配置：远端 DSH' : 'Agent 与模型：本机 DSH'}</strong><p>{form.mode === 'full' ? '文件、终端、任务和模型请求都由远端处理。Skill 可选择同步，模型与 MCP 使用远端配置。' : '沿用本机模型和 Skill；文件通过共享目录访问，Bash 在远端执行。适合已有环境与低配置主机。'}</p></div>
-                  <p className="dsh-ssh__hint">仅为「{item.title}」选择模式，同一环境中的其他项目保持原模式。两种模式使用同一远程目录，分别保留会话历史；切换不会迁移旧会话或停止原模式，可从各自入口继续。</p>
-                  {switching && form.mode === 'full' && <p className="dsh-ssh__hint">首次使用全量模式将安装匹配的远端 DSH，模型配置使用远端环境。</p>}
-                  {switching && form.mode === 'light' && item.target.kind !== 'wsl' && <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mount`}>{item.target.kind === 'docker' ? '本机共享/挂载路径' : '本机 SSHFS 挂载路径'}<input id={`saved-${item.id}-mount`} value={form.localPath} onChange={event => manager.changeConnection('localPath', event.target.value)} disabled={busy} placeholder="已有轻量项目可留空复用，否则填写已建立的挂载路径" /></label>}
-                  </>}
-                  {ssh && (form.connection || switching || item.mode !== 'full') && <>
-                    <p className="dsh-ssh__hint">登录方式：{ssh.auth === 'password' ? '仅密码' : ssh.auth === 'certificate' ? '证书' : ssh.auth === 'key' ? '密钥' : '自动选择'}{ssh.identityFile ? ` · ${ssh.identityFile}` : ''}{ssh.certificateFile ? ` · ${ssh.certificateFile}` : ''}</p>
-                    <p className="dsh-ssh__hint">密码和私钥口令仅本次运行保留；留空沿用已提供的凭据。</p>
-                    {(!ssh.auth || ssh.auth === 'auto' || ssh.auth === 'password') && <label className="dsh-ssh__field">SSH 密码<input type="password" autoComplete="off" value={form.password} onChange={event => manager.changeCredential('password', event.target.value)} disabled={busy} /></label>}
-                    {ssh.auth !== 'password' && <label className="dsh-ssh__field">私钥口令<input type="password" autoComplete="off" value={form.passphrase} onChange={event => manager.changeCredential('passphrase', event.target.value)} disabled={busy} placeholder="未加密私钥可留空" /></label>}
-                  </>}
-                  {!form.connection && item.mode === 'full' && !switching && <p className="dsh-ssh__hint">当前已使用全量模式。连接、断开和认证请在上方的全量连接中操作。</p>}
-                  <div className="dsh-ssh__actions"><button className="dsh-ssh__button" type="submit" disabled={busy || (!form.connection && item.mode === 'full' && !switching)}>{connecting ? '连接中…' : form.connection ? (form.force ? '重新连接全量后端' : '连接全量后端') : switching ? `以${form.mode === 'full' ? '全量' : '轻量'}模式连接` : '连接此模式'}</button><button className="dsh-ssh__text-button" type="button" onClick={() => manager.editCredentials(null)} disabled={busy}>取消</button></div>
-                </form>
+    <div className="dsh-ssh__settings-head">
+      <div><strong>{form.connection ? '连接认证' : '项目设置'}</strong><p className="dsh-ssh__hint">{form.connection ? '认证影响共享此连接的全部项目，不修改项目模式。' : '仅调整当前项目，不影响同一环境中的其他项目。'}</p></div>
+      <button type="button" className="dsh-ssh__icon-button" aria-label="关闭连接设置" title="关闭" onClick={() => manager.editCredentials(null)} disabled={busy}>×</button>
+    </div>
+    {form.connection ? <p className="dsh-ssh__hint">此认证用于共享的全量后端连接，影响该连接下的所有项目，不修改项目模式。</p> : <>
+      <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mode`}>此项目的运行模式<select id={`saved-${item.id}-mode`} value={form.mode} onChange={event => manager.changeConnection('mode', event.target.value)} disabled={busy}><option value="light">轻量模式</option><option value="full">全量模式</option></select></label>
+      <div className="dsh-ssh__scope"><strong>{form.mode === 'full' ? '执行与配置：远端 DSH' : 'Agent 与模型：本机 DSH'}</strong><p>{form.mode === 'full' ? '文件、终端、任务和模型请求都由远端处理。Skill 可选择同步，模型与 MCP 使用远端配置。' : '沿用本机模型和 Skill；文件通过共享目录访问，Bash 在远端执行。适合已有环境与低配置主机。'}</p></div>
+      <p className="dsh-ssh__hint">仅为「{item.title}」选择模式，同一环境中的其他项目保持原模式。两种模式使用同一远程目录，分别保留会话历史；切换不会迁移旧会话或停止原模式，可从各自入口继续。</p>
+      {switching && form.mode === 'full' && <p className="dsh-ssh__hint">首次使用全量模式将安装匹配的远端 DSH，模型配置使用远端环境。</p>}
+      {switching && form.mode === 'light' && item.target.kind !== 'wsl' && <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mount`}>{item.target.kind === 'docker' ? '本机共享/挂载路径' : '本机 SSHFS 挂载路径'}<input id={`saved-${item.id}-mount`} value={form.localPath} onChange={event => manager.changeConnection('localPath', event.target.value)} disabled={busy} placeholder="已有轻量项目可留空复用，否则填写已建立的挂载路径" /></label>}
+    </>}
+    {ssh && (form.connection || switching || item.mode !== 'full') && <>
+      <p className="dsh-ssh__hint">登录方式：{ssh.auth === 'password' ? '仅密码' : ssh.auth === 'certificate' ? '证书' : ssh.auth === 'key' ? '密钥' : '自动选择'}{ssh.identityFile ? ` · ${ssh.identityFile}` : ''}{ssh.certificateFile ? ` · ${ssh.certificateFile}` : ''}。密码和私钥口令仅本次运行保留；留空沿用已提供的凭据。</p>
+      {(!ssh.auth || ssh.auth === 'auto' || ssh.auth === 'password') && <label className="dsh-ssh__field">SSH 密码<input type="password" autoComplete="off" value={form.password} onChange={event => manager.changeCredential('password', event.target.value)} disabled={busy} /></label>}
+      {ssh.auth !== 'password' && <label className="dsh-ssh__field">私钥口令<input type="password" autoComplete="off" value={form.passphrase} onChange={event => manager.changeCredential('passphrase', event.target.value)} disabled={busy} placeholder="未加密私钥可留空" /></label>}
+    </>}
+    {!form.connection && item.mode === 'full' && !switching && <p className="dsh-ssh__hint">当前已使用全量模式。连接、断开和认证请在上方的全量连接中操作。</p>}
+    <div className="dsh-ssh__settings-actions">
+      <button className="dsh-ssh__button dsh-ssh__button--primary" type="submit" disabled={busy || (!form.connection && item.mode === 'full' && !switching)}>{connecting ? '连接中…' : form.connection ? (form.force ? '重新连接全量后端' : '连接全量后端') : switching ? `以${form.mode === 'full' ? '全量' : '轻量'}模式连接` : '连接此模式'}</button>
+      <button className="dsh-ssh__text-button" type="button" onClick={() => manager.editCredentials(null)} disabled={busy}>取消</button>
+    </div>
+  </form>
 }
 
 function connectionPending(state: Snapshot, group: ConnectionGroup, action: string): boolean {
@@ -551,11 +582,15 @@ function FullConnection({ manager, state, group, label }: Injected & { state: Sn
   const authRow = group.rows.find(item => item.id === state.reauth?.id)
   const error = group.rows.find(item => item.backendHealth?.connectionError)?.backendHealth?.connectionError
   return <section className='dsh-ssh__backend' data-backend-key={group.key} aria-label={`${label} 的全量连接`} aria-busy={connecting || disconnecting}>
-    <div className='dsh-ssh__backend-heading'>
-      <div><strong>共享全量后端</strong><span className='dsh-ssh__registration' data-connection-state={status} role='status'>{disconnecting ? '正在断开' : CONNECTION_LABELS[status]}</span><p className='dsh-ssh__hint'>{label} · {connectionLabel(row)}</p></div>
+    <div className='dsh-ssh__backend-bar'>
+      <span className='dsh-ssh__connection-symbol dsh-ssh__connection-symbol--small' data-connection-state={status}><ConnectionIcon small /></span>
+      <div className='dsh-ssh__backend-heading'>
+        <div><strong>共享全量后端</strong><span className='dsh-ssh__registration' data-connection-state={status} role='status'>{disconnecting ? '正在断开' : CONNECTION_LABELS[status]}</span></div>
+        <p className='dsh-ssh__hint'>{label} · {connectionLabel(row)}</p>
+      </div>
       <div className='dsh-ssh__environment-actions'>
         {active ? <button type='button' className='dsh-ssh__button' disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(row.id)} aria-label={`断开 ${label} 的全量连接`}>{disconnecting ? '正在断开…' : connecting ? '取消连接' : '断开连接'}</button> : <button type='button' className='dsh-ssh__button dsh-ssh__button--primary' disabled={busy} onClick={() => manager.reconnectBackend(row.id)} aria-label={`连接 ${label} 的全量连接`}>连接</button>}
-        <details className='dsh-ssh__more'><summary aria-label={`${label} 的连接操作`}>更多</summary><div className='dsh-ssh__more-actions'>
+        <details className='dsh-ssh__more'><summary aria-label={`${label} 的连接操作`} title="连接操作">⋯</summary><div className='dsh-ssh__more-actions'>
           <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.reconnectBackend(row.id, true)}>重新连接</button>
           {sshTarget(row.target) && <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.editConnection(row.id, true, active)}>连接认证</button>}
           <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.newProject(row.id)}>使用此连接添加项目</button>
@@ -582,15 +617,15 @@ function Environment({ manager, state, group }: Injected & { state: Snapshot; gr
   return <li className='dsh-ssh__environment' data-environment-key={group.key}>
     <header className='dsh-ssh__environment-heading'>
       <button type='button' className='dsh-ssh__environment-toggle' aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)} aria-label={`${expanded ? '收起' : '展开'} ${label} 的项目`}>
-        <span className='dsh-ssh__chevron' aria-hidden='true'>{expanded ? '⌄' : '›'}</span><span className='dsh-ssh__connection-symbol' data-connection-state={status}><ConnectionIcon /></span>
+        <span className='dsh-ssh__chevron' aria-hidden='true'>{expanded ? '▾' : '›'}</span>
+        <span className='dsh-ssh__connection-symbol' data-connection-state={status}><ConnectionIcon /></span>
         <span className='dsh-ssh__environment-name'><strong>{label}</strong><span>{environmentDetail(group.target)} · {status === 'partial' ? '部分连接' : CONNECTION_LABELS[status]} · {group.rows.length} 个项目{group.rows.length !== group.visible.length ? `（显示 ${group.visible.length} 个）` : ''}</span></span>
       </button>
-      <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.newProject(group.visible[0]!.id)} aria-label={`向 ${label} 添加项目`}>＋ 添加项目</button>
+      <button type='button' className='dsh-ssh__button' disabled={busy} onClick={() => manager.newProject(group.visible[0]!.id)} aria-label={`向 ${label} 添加项目`}>＋ 添加项目</button>
     </header>
     <div id={id} hidden={!expanded}>
       {group.connections.map((connection, index) => connection.visible.length > 0 && <FullConnection key={connection.key} manager={manager} state={state} group={connection} label={group.connections.length > 1 ? `${label} · ${connectionLabel(connection.rows[0]!)} · 连接 ${index + 1}` : label} />)}
       <section className='dsh-ssh__projects' aria-label={`${label} 的项目目录`}>
-        <div className='dsh-ssh__backend-heading'><div><strong>项目目录</strong><p className='dsh-ssh__hint'>每个项目单独选择轻量或全量模式；轻量连接独立控制。</p></div></div>
         <ul className='dsh-ssh__environment-projects'>{group.visible.map(item => {
           const index = group.connections.findIndex(connection => connection.rows.includes(item))
           return <ProjectRow key={item.id} manager={manager} state={state} item={item} connection={group.connections[index]} connectionIndex={index >= 0 && group.connections.length > 1 ? index : undefined} />
@@ -614,20 +649,21 @@ function SavedConnections({ manager, state }: Injected & { state: Snapshot }) {
   const visible = groups.flatMap(group => group.visible)
   return <section className="dsh-ssh__saved" aria-labelledby="dsh-ssh-saved-heading">
     <div className="dsh-ssh__section-head">
-      <div><h3 id="dsh-ssh-saved-heading">我的远程项目 <span className="dsh-ssh__count">{workspaces.length}</span></h3><p className="dsh-ssh__hint">{online} 个已连接 · 继续已有对话可直接从左侧项目展开。</p></div>
+      <div><h3 id="dsh-ssh-saved-heading">远程项目 <span className="dsh-ssh__count">{workspaces.length}</span></h3><p className="dsh-ssh__hint">{online} 个已连接 · {workspaces.length - online} 个离线 · 旧对话可从左侧项目展开。</p></div>
       <div className="dsh-ssh__actions">
-      <button type="button" className="dsh-ssh__text-button" onClick={manager.refresh} disabled={state.pending.includes('status')}>
+      <button type="button" className="dsh-ssh__text-button" onClick={manager.refresh} disabled={state.pending.includes('status')} aria-label="刷新项目列表">
         {state.pending.includes('status') ? '刷新中…' : '刷新'}
       </button>
       <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" aria-label="添加项目" onClick={() => manager.newProject()} disabled={busy}><span aria-hidden="true">＋</span> 添加项目</button>
       </div>
     </div>
-    {!!workspaces.length && <div className="dsh-ssh__filters"><label className="dsh-ssh__field"><span className="dsh-ssh__sr-only">搜索远程项目</span><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索项目、设备或路径" /></label><label className="dsh-ssh__field"><span className="dsh-ssh__sr-only">筛选远程项目</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部项目</option><option value="full">全量模式</option><option value="light">轻量模式</option><option value="offline">未连接 / 异常</option><option value="ssh">SSH</option><option value="wsl">WSL</option><option value="docker">Docker</option></select></label></div>}
+    {!!workspaces.length && <div className="dsh-ssh__filters"><label className="dsh-ssh__field dsh-ssh__field--search"><span className="dsh-ssh__sr-only">搜索远程项目</span><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索项目、设备或路径" /></label><label className="dsh-ssh__field"><span className="dsh-ssh__sr-only">筛选远程项目</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部项目</option><option value="full">全量模式</option><option value="light">轻量模式</option><option value="offline">未连接 / 异常</option><option value="ssh">SSH</option><option value="wsl">WSL</option><option value="docker">Docker</option></select></label><span className="dsh-ssh__filter-count" aria-live="polite">{visible.length === workspaces.length ? `共 ${workspaces.length} 个项目` : `显示 ${visible.length} / ${workspaces.length}`}</span></div>}
     <ErrorNotice message={state.errors.status} />
     <ErrorNotice message={state.errors.connections} />
     {!workspaces.length && <div className="dsh-ssh__empty">
       <ConnectionIcon /><p>{state.pending.includes('status') ? '正在读取工作区…' : state.errors.status ? '暂时无法读取工作区' : '还没有远程工作区'}</p>
       <span>{state.errors.status ? '点击刷新重试。' : '添加后，也会显示在原生工作区列表中。'}</span>
+      {!state.pending.includes('status') && !state.errors.status && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" onClick={() => manager.newProject()} disabled={busy}>添加第一个项目</button>}
     </div>}
     {!!workspaces.length && !visible.length && <p className="dsh-ssh__empty">没有符合条件的项目。请调整搜索或筛选。</p>}
     <ul className="dsh-ssh__saved-list">
@@ -659,6 +695,12 @@ function SkillSyncPanel({ manager, state }: Injected & { state: Snapshot }) {
   const online = !!workspace && connectionState(workspace) === 'connected'
   const selected = form.preview?.items.filter(row => form.selected.includes(row.id)) ?? []
   const bytes = selected.reduce((sum, row) => sum + row.bytes, 0)
+  const counts = form.preview ? {
+    missing: form.preview.items.filter(row => row.state === 'missing').length,
+    different: form.preview.items.filter(row => row.state === 'different').length,
+    equal: form.preview.items.filter(row => row.state === 'equal').length,
+    blocked: form.preview.items.filter(row => row.state === 'blocked').length,
+  } : null
   const labels = { missing: '远端缺少', equal: '已一致', different: '内容不同', blocked: '不可同步' }
   const visible = form.preview?.items.filter(row => `${row.name} ${row.description} ${row.source}`.toLowerCase().includes(search.toLowerCase().trim())) ?? []
   return <section className="dsh-ssh__skills" aria-labelledby="dsh-ssh-skills-title" aria-busy={loading || busy}>
@@ -669,8 +711,14 @@ function SkillSyncPanel({ manager, state }: Injected & { state: Snapshot }) {
     {!online && <ErrorNotice message="连接已断开，请返回工作区重新连接，再读取技能列表。" />}
     <ErrorNotice message={state.errors.skills} />
     {form.result && <ul className="dsh-ssh__sync-results" aria-label="同步结果">{form.result.items.map(row => <li key={row.id} data-result={row.status}><strong>{row.name}</strong>：{row.status === 'created' ? '已推送' : row.status === 'updated' ? '已更新' : `失败：${row.message}`}</li>)}</ul>}
-    <div className="dsh-ssh__actions"><button className="dsh-ssh__button" type="button" disabled={busy || loading || !online} onClick={() => manager.loadSkills(form.id, form.result)}>{loading ? '读取中…' : '刷新差异'}</button><button className="dsh-ssh__text-button" type="button" disabled={busy || loading} onClick={() => manager.selectMissingSkills()}>选择缺失项</button><button className="dsh-ssh__text-button" type="button" disabled={busy || loading} onClick={() => manager.selectMissingSkills(true)}>清空选择</button></div>
-    <label className="dsh-ssh__field">搜索 Skill<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="按名称、描述或来源筛选" /></label>
+    {counts && <div className="dsh-ssh__skill-summary" aria-label="技能差异概览">
+      {counts.missing > 0 && <span data-state="missing">{counts.missing} 项远端缺少</span>}
+      {counts.different > 0 && <span data-state="different">{counts.different} 项内容不同</span>}
+      {counts.equal > 0 && <span data-state="equal">{counts.equal} 项已一致</span>}
+      {counts.blocked > 0 && <span data-state="blocked">{counts.blocked} 项不可同步</span>}
+      {!counts.missing && !counts.different && !counts.blocked && <span data-state="equal">全部技能已一致</span>}
+    </div>}
+    <div className="dsh-ssh__skill-toolbar"><div className="dsh-ssh__actions"><button className="dsh-ssh__button" type="button" disabled={busy || loading || !online} onClick={() => manager.loadSkills(form.id, form.result)}>{loading ? '读取中…' : '刷新差异'}</button><button className="dsh-ssh__text-button" type="button" disabled={busy || loading} onClick={() => manager.selectMissingSkills()}>选择缺失项</button><button className="dsh-ssh__text-button" type="button" disabled={busy || loading} onClick={() => manager.selectMissingSkills(true)}>清空选择</button></div><label className="dsh-ssh__field dsh-ssh__field--search">搜索 Skill<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="按名称、描述或来源筛选" /></label></div>
     <label className="dsh-ssh__sync-overwrite"><input type="checkbox" checked={form.overwrite} disabled={busy || loading} onChange={event => manager.overwriteSkills(event.target.checked)} />允许覆盖所选差异项（内容不同的项需要另外勾选）</label>
     {loading && <p className="dsh-ssh__hint" role="status">正在比较本机与远端的技能…</p>}
     {form.preview && !form.preview.items.length && <p className="dsh-ssh__empty">本机 DSH 尚未发现可同步的用户或自定义技能。请先在 DSH 中配置 Skill，再刷新。</p>}
@@ -682,8 +730,20 @@ function SkillSyncPanel({ manager, state }: Injected & { state: Snapshot }) {
   </section>
 }
 
+function RemotePathCrumbs({ path, disabled, onNavigate }: { path: string; disabled: boolean; onNavigate: (path: string) => void }) {
+  const parts = path.split('/').filter(Boolean)
+  const nodes = [{ label: '/', path: '/' }, ...parts.map((part, index) => ({ label: part, path: `/${parts.slice(0, index + 1).join('/')}` }))]
+  return <nav className="dsh-ssh__crumbs" aria-label="远程目录路径">
+    {nodes.map((node, index) => <span className="dsh-ssh__crumb" key={node.path}>
+      {index > 0 && <span className="dsh-ssh__crumb-sep" aria-hidden="true">›</span>}
+      <button type="button" disabled={disabled || index === nodes.length - 1} title={node.path} onClick={() => onNavigate(node.path)}>{node.label}</button>
+    </span>)}
+  </nav>
+}
+
 function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
   const id = useId()
+  const [dirFilter, setDirFilter] = useState('')
   const keyPicker = useRef<HTMLInputElement>(null)
   const certificatePicker = useRef<HTMLInputElement>(null)
   const hostPaths = (globalThis as typeof globalThis & { __DSH_HOST_PATHS__?: { pathFor(file: File): string } }).__DSH_HOST_PATHS__
@@ -695,8 +755,13 @@ function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
   const busy = mutationPending(state)
   const inspecting = state.pending.includes('test') || state.pending.includes('browse')
   const change = (field: keyof Draft) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => manager.change(field, event.currentTarget.value)
+  useEffect(() => setDirFilter(''), [state.tab, state.directory?.path])
+  const directories = state.directory ? state.directory.directories.filter(name => name.toLowerCase().includes(dirFilter.trim().toLowerCase())) : []
   return <section className="dsh-ssh__new" aria-labelledby={`${id}-heading`}>
-    <div className="dsh-ssh__section-head"><h3 id={`${id}-heading`}>添加远程项目</h3><button className="dsh-ssh__text-button" type="button" disabled={busy} onClick={manager.showProjects}>返回项目列表</button></div>
+    <div className="dsh-ssh__section-head">
+      <div><h3 id={`${id}-heading`}>添加远程项目</h3><p className="dsh-ssh__hint">先选择连接方式与运行位置，再指定远程目录。</p></div>
+      <button className="dsh-ssh__text-button" type="button" disabled={busy} onClick={manager.showProjects}>返回项目列表</button>
+    </div>
     <div className="dsh-ssh__tabs" role="tablist" aria-label="连接方式" onKeyDown={event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || busy) return
       const kinds: Kind[] = state.status && state.status.platform !== 'win32' ? ['ssh', 'docker'] : ['ssh', 'wsl', 'docker']
@@ -708,18 +773,23 @@ function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
       {(['ssh', 'wsl', 'docker'] as const).map(kind => <button type="button" role="tab" key={kind} id={`${id}-${kind}`} aria-selected={state.tab === kind} aria-controls={`${id}-panel`} tabIndex={state.tab === kind ? 0 : -1} disabled={busy || (kind === 'wsl' && state.status !== null && state.status.platform !== 'win32')} onClick={() => manager.setTab(kind)}>{kind.toUpperCase()}</button>)}
     </div>
     <form id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${state.tab}`} onSubmit={event => { event.preventDefault(); manager.add() }}>
-      <fieldset className="dsh-ssh__modes" disabled={busy}>
-        <legend>运行模式</legend>
-        {(['full', 'light'] as const).map(mode => <label key={mode} className={`dsh-ssh__mode${draft.mode === mode ? ' dsh-ssh__mode--selected' : ''}`}>
-          <input type="radio" name={`${id}-mode`} value={mode} checked={draft.mode === mode} onChange={() => manager.setMode(mode)} />
-          <span><strong>{mode === 'light' ? '轻量模式' : '全量模式'}</strong><small>{mode === 'light' ? '不安装远端 DSH · 本机运行 Agent' : '安装远端 DSH · 完整远程后端'}</small></span>
-        </label>)}
-      </fieldset>
-      <p className="dsh-ssh__intro">{full
-        ? `${docker ? '通过 Docker exec 在容器内部署版本匹配的 DSH 后端，无需容器开放 SSH 端口。' : ssh ? '使用本机 SSH 配置与密钥连接，自动部署版本匹配的远程 DSH 后端。' : '在 WSL 内部署完整 DSH 后端，通过本机隧道连接，无需 SSH 服务。'} 文件、Agent、终端与任务均在远端运行，无需 SSHFS 挂载。`
-        : `${docker ? '通过已有共享/挂载路径访问文件，通过 Docker exec 执行命令。' : ssh ? '通过 SSHFS 挂载访问文件、通过 SSH 执行命令。' : '通过 Windows 的 WSL 目录共享访问文件、通过 WSL 执行命令。'} Agent 在本机运行，沿用本机 Skill，远端不安装 DSH。`}</p>
-      <fieldset className="dsh-ssh__fields" disabled={busy}>
-        <legend className="dsh-ssh__group-title">{docker ? 'Docker 连接信息' : ssh ? 'SSH 连接信息' : 'WSL 连接信息'}</legend>
+      <section className="dsh-ssh__card">
+        <div className="dsh-ssh__card-head"><h4>运行模式</h4><span className="dsh-ssh__hint">模式属于项目，可随时切换</span></div>
+        <fieldset className="dsh-ssh__modes" disabled={busy}>
+          <legend className="dsh-ssh__sr-only">运行模式</legend>
+          {(['full', 'light'] as const).map(mode => <label key={mode} className={`dsh-ssh__mode${draft.mode === mode ? ' dsh-ssh__mode--selected' : ''}`}>
+            <input type="radio" name={`${id}-mode`} value={mode} checked={draft.mode === mode} onChange={() => manager.setMode(mode)} />
+            <span><strong>{mode === 'light' ? '轻量模式' : '全量模式'}</strong><small>{mode === 'light' ? '不安装远端 DSH · 本机运行 Agent' : '安装远端 DSH · 完整远程后端'}</small></span>
+          </label>)}
+        </fieldset>
+        <p className="dsh-ssh__intro">{full
+          ? `${docker ? '通过 Docker exec 在容器内部署版本匹配的 DSH 后端，无需容器开放 SSH 端口。' : ssh ? '使用本机 SSH 配置与密钥连接，自动部署版本匹配的远程 DSH 后端。' : '在 WSL 内部署完整 DSH 后端，通过本机隧道连接，无需 SSH 服务。'} 文件、Agent、终端与任务均在远端运行，无需 SSHFS 挂载。`
+          : `${docker ? '通过已有共享/挂载路径访问文件，通过 Docker exec 执行命令。' : ssh ? '通过 SSHFS 挂载访问文件、通过 SSH 执行命令。' : '通过 Windows 的 WSL 目录共享访问文件、通过 WSL 执行命令。'} Agent 在本机运行，沿用本机 Skill，远端不安装 DSH。`}</p>
+      </section>
+      <section className="dsh-ssh__card">
+        <div className="dsh-ssh__card-head"><h4>{docker ? 'Docker 连接' : ssh ? 'SSH 连接' : 'WSL 连接'}</h4></div>
+        <fieldset className="dsh-ssh__fields" disabled={busy}>
+          <legend className="dsh-ssh__sr-only">{docker ? 'Docker 连接信息' : ssh ? 'SSH 连接信息' : 'WSL 连接信息'}</legend>
         {docker && <>
           <label className="dsh-ssh__field" htmlFor={`${id}-dockerLocation`}>Docker 所在位置<select id={`${id}-dockerLocation`} value={draft.dockerLocation} onChange={change('dockerLocation')}><option value="local">本机 Docker / Docker Context</option><option value="ssh">SSH 服务器上的 Docker</option></select></label>
           {!ssh && <label className="dsh-ssh__field" htmlFor={`${id}-context`}>Docker Context <span className="dsh-ssh__optional">可选</span><input id={`${id}-context`} value={draft.context} onChange={change('context')} placeholder="留空使用 Docker CLI 当前上下文" /><span className="dsh-ssh__hint">可填写已配置的远程 Context 名称。此环境需要可用的 Docker CLI。</span></label>}
@@ -776,8 +846,10 @@ function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
             </div>
             <p className="dsh-ssh__hint">使用 SSH CA 签发的用户证书及配套私钥；不是 HTTPS/X.509 证书。</p>
           </>}
-          {(draft.sshAuth === 'auto' || draft.sshAuth === 'password') && <label className="dsh-ssh__field" htmlFor={`${id}-password`}>SSH 登录密码 <span className="dsh-ssh__optional">{draft.sshAuth === 'auto' ? '可选' : '必填'}</span><input id={`${id}-password`} type="password" value={draft.password} onChange={change('password')} autoComplete="off" required={draft.sshAuth === 'password'} placeholder="仅保留在当前进程内" /></label>}
-          {draft.sshAuth !== 'password' && <label className="dsh-ssh__field" htmlFor={`${id}-passphrase`}>私钥口令 <span className="dsh-ssh__optional">可选</span><input id={`${id}-passphrase`} type="password" value={draft.passphrase} onChange={change('passphrase')} autoComplete="off" placeholder="未加密私钥或已使用 ssh-agent 可留空" /></label>}
+          <div className="dsh-ssh__secret-row">
+            {(draft.sshAuth === 'auto' || draft.sshAuth === 'password') && <label className="dsh-ssh__field" htmlFor={`${id}-password`}>SSH 登录密码 <span className="dsh-ssh__optional">{draft.sshAuth === 'auto' ? '可选' : '必填'}</span><input id={`${id}-password`} type="password" value={draft.password} onChange={change('password')} autoComplete="off" required={draft.sshAuth === 'password'} placeholder="仅保留在当前进程内" /></label>}
+            {draft.sshAuth !== 'password' && <label className="dsh-ssh__field" htmlFor={`${id}-passphrase`}>私钥口令 <span className="dsh-ssh__optional">可选</span><input id={`${id}-passphrase`} type="password" value={draft.passphrase} onChange={change('passphrase')} autoComplete="off" placeholder="未加密私钥或已使用 ssh-agent 可留空" /></label>}
+          </div>
           <p className="dsh-ssh__hint">密码和私钥口令不保存到连接记录，重启后需重新填写。首次连接新主机，请先在终端运行 ssh 并核对主机指纹。</p>
         </>}
         {docker && <>
@@ -787,28 +859,41 @@ function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
           <label className="dsh-ssh__field" htmlFor={`${id}-dockerUser`}>容器内用户 <span className="dsh-ssh__optional">可选</span><input id={`${id}-dockerUser`} value={draft.dockerUser} onChange={change('dockerUser')} placeholder="留空使用容器默认用户；支持 UID:GID" /></label>
           <p className="dsh-ssh__hint">仅连接已有的运行中容器，不自动启动或重建。容器内需 Python 3、Bash；全量模式还需 glibc Linux 和网络。所选用户需有有效的 home 目录。</p>
         </>}
-        <h4 className="dsh-ssh__group-title">项目目录</h4>
-        <label className="dsh-ssh__field" htmlFor={`${id}-path`}>远程项目目录 <span aria-hidden="true">*</span><input id={`${id}-path`} value={draft.remotePath} onChange={change('remotePath')} placeholder="/home/user/project" required autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-describedby={`${id}-path-help`} /></label>
-        <p className="dsh-ssh__hint" id={`${id}-path-help`}>输入绝对路径，或浏览后选择目录。当前显示的目录即将添加的项目。</p>
-        <div className="dsh-ssh__actions">
-          <button type="button" className="dsh-ssh__button" disabled={inspecting} onClick={() => manager.browse()}>{state.pending.includes('browse') ? '浏览中…' : '浏览目录'}</button>
-          <button type="button" className="dsh-ssh__button" disabled={inspecting} onClick={manager.test}>{state.pending.includes('test') ? '测试中…' : '测试连接'}</button>
-        </div>
-        {!docker && ssh && !full && <>
-          <label className="dsh-ssh__field" htmlFor={`${id}-localPath`}>本机 SSHFS 挂载路径 <span className="dsh-ssh__optional">{windows && draft.sshAuth === 'auto' ? '可选' : '必填'}</span><input id={`${id}-localPath`} value={draft.localPath} onChange={change('localPath')} placeholder={windows ? 'Z:\\project' : '/mnt/remote-project'} required={!windows || draft.sshAuth !== 'auto'} spellCheck={false} /></label>
-          <p className="dsh-ssh__hint">{draft.sshAuth !== 'auto' ? '请先使用同一凭据建立 SSHFS 挂载，再填写挂载路径。自动 SSHFS 共享不能接收这里的密码、密钥或证书。' : windows ? '轻量 SSH 需要 WinFsp 与 SSHFS-Win，或已建立的 SSHFS 挂载。挂载路径必须对应上方整个远程目录。' : '先通过 SSHFS 挂载项目，再填写本机挂载目录。'} 切换到全量模式可直接使用远程文件系统。</p>
-        </>}
-        {docker && !full && <><label className="dsh-ssh__field" htmlFor={`${id}-localPath`}>本机共享/挂载路径<input id={`${id}-localPath`} value={draft.localPath} onChange={change('localPath')} placeholder={windows ? 'D:\\projects\\demo' : '/home/user/projects/demo'} required /></label><p className="dsh-ssh__hint">本机目录必须与上方容器目录双向共享，例如已有 bind mount。远端 Docker 可使用已建立的文件挂载。添加时会实际校验，普通本机目录不能冒充远程目录。</p></>}
-        {state.directory && <div className="dsh-ssh__browser" aria-label="远程目录浏览器" aria-busy={state.pending.includes('browse')}>
-          <div className="dsh-ssh__browser-head"><code title={state.directory.path}>{state.directory.path}</code><button type="button" className="dsh-ssh__text-button" disabled={inspecting || state.directory.path === '/'} onClick={() => manager.browse(parentRemote(state.directory?.path ?? '/'))}>上一级</button></div>
-          <ul className="dsh-ssh__directories">{state.directory.directories.map(directory => <li key={directory}><button type="button" disabled={inspecting} onClick={() => manager.browse(joinRemote(state.directory?.path ?? '/', directory))} title={directory}><span aria-hidden="true">▱</span><span>{directory}</span><span aria-hidden="true">›</span></button></li>)}</ul>
-          {!state.directory.directories.length && <p className="dsh-ssh__hint dsh-ssh__browser-empty">此目录没有子目录，可以直接添加。</p>}
-        </div>}
-        {state.info && <p className="dsh-ssh__success" role="status">已连接：{state.info.user} · {state.info.platform} · Python {state.info.python}<span className="dsh-ssh__tested-path">{state.info.path}</span></p>}
-        <label className="dsh-ssh__field" htmlFor={`${id}-title`}>工作区名称 <span className="dsh-ssh__optional">可选</span><input id={`${id}-title`} value={draft.title} onChange={change('title')} placeholder="留空使用项目目录名" /></label>
-      </fieldset>
+        </fieldset>
+      </section>
+      <section className="dsh-ssh__card">
+        <div className="dsh-ssh__card-head"><h4>项目目录</h4><span className="dsh-ssh__hint">远程绝对路径</span></div>
+        <fieldset className="dsh-ssh__fields" disabled={busy}>
+          <legend className="dsh-ssh__sr-only">项目目录</legend>
+          <div className="dsh-ssh__path-row">
+            <label className="dsh-ssh__field" htmlFor={`${id}-path`}>远程项目目录 <span aria-hidden="true">*</span><input id={`${id}-path`} value={draft.remotePath} onChange={change('remotePath')} placeholder="/home/user/project" required autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-describedby={`${id}-path-help`} /></label>
+            <div className="dsh-ssh__path-actions">
+              <button type="button" className="dsh-ssh__button" disabled={inspecting} onClick={() => manager.browse()}>{state.pending.includes('browse') ? '浏览中…' : '浏览目录'}</button>
+              <button type="button" className="dsh-ssh__button" disabled={inspecting} onClick={manager.test}>{state.pending.includes('test') ? '测试中…' : '测试连接'}</button>
+            </div>
+          </div>
+          <p className="dsh-ssh__hint" id={`${id}-path-help`}>输入绝对路径，或浏览后选择目录。当前目录将作为项目目录。</p>
+          {!docker && ssh && !full && <>
+            <label className="dsh-ssh__field" htmlFor={`${id}-localPath`}>本机 SSHFS 挂载路径 <span className="dsh-ssh__optional">{windows && draft.sshAuth === 'auto' ? '可选' : '必填'}</span><input id={`${id}-localPath`} value={draft.localPath} onChange={change('localPath')} placeholder={windows ? 'Z:\\project' : '/mnt/remote-project'} required={!windows || draft.sshAuth !== 'auto'} spellCheck={false} /></label>
+            <p className="dsh-ssh__hint">{draft.sshAuth !== 'auto' ? '请先使用同一凭据建立 SSHFS 挂载，再填写挂载路径。自动 SSHFS 共享不能接收这里的密码、密钥或证书。' : windows ? '轻量 SSH 需要 WinFsp 与 SSHFS-Win，或已建立的 SSHFS 挂载。挂载路径必须对应上方整个远程目录。' : '先通过 SSHFS 挂载项目，再填写本机挂载目录。'} 切换到全量模式可直接使用远程文件系统。</p>
+          </>}
+          {docker && !full && <><label className="dsh-ssh__field" htmlFor={`${id}-localPath`}>本机共享/挂载路径<input id={`${id}-localPath`} value={draft.localPath} onChange={change('localPath')} placeholder={windows ? 'D:\\projects\\demo' : '/home/user/projects/demo'} required /></label><p className="dsh-ssh__hint">本机目录必须与上方容器目录双向共享，例如已有 bind mount。远端 Docker 可使用已建立的文件挂载。添加时会实际校验，普通本机目录不能冒充远程目录。</p></>}
+          {state.directory && <div className="dsh-ssh__browser" aria-label="远程目录浏览器" aria-busy={state.pending.includes('browse')}>
+            <div className="dsh-ssh__browser-head">
+              <RemotePathCrumbs path={state.directory.path} disabled={inspecting} onNavigate={path => manager.browse(path)} />
+              <button type="button" className="dsh-ssh__text-button" disabled={inspecting || state.directory.path === '/'} onClick={() => manager.browse(parentRemote(state.directory?.path ?? '/'))}>上一级</button>
+            </div>
+            {state.directory.directories.length > 8 && <label className="dsh-ssh__browser-filter"><span className="dsh-ssh__sr-only">筛选子目录</span><input type="search" value={dirFilter} onChange={event => setDirFilter(event.target.value)} placeholder="筛选子目录" /></label>}
+            <ul className="dsh-ssh__directories">{directories.map(directory => <li key={directory}><button type="button" disabled={inspecting} onClick={() => manager.browse(joinRemote(state.directory?.path ?? '/', directory))} title={directory}><span aria-hidden="true">▱</span><span>{directory}</span><span aria-hidden="true">›</span></button></li>)}</ul>
+            {!directories.length && <p className="dsh-ssh__hint dsh-ssh__browser-empty">{state.directory.directories.length ? '没有匹配的子目录。' : '此目录没有子目录，可以直接添加。'}</p>}
+            <div className="dsh-ssh__browser-foot"><span className="dsh-ssh__hint">当前目录将作为项目目录</span><code title={state.directory.path}>{state.directory.path}</code></div>
+          </div>}
+          {state.info && <p className="dsh-ssh__success" role="status">已连接：{state.info.user} · {state.info.platform} · Python {state.info.python}<span className="dsh-ssh__tested-path">{state.info.path}</span></p>}
+          <label className="dsh-ssh__field" htmlFor={`${id}-title`}>工作区名称 <span className="dsh-ssh__optional">可选</span><input id={`${id}-title`} value={draft.title} onChange={change('title')} placeholder="留空使用项目目录名" /></label>
+        </fieldset>
+      </section>
       <ErrorNotice message={state.errors.form} />
-      <div className="dsh-ssh__form-footer"><p>{full ? '远端需 Linux/WSL、Python 3、Bash 和网络访问。首次添加会安装 Node/DSH，可能需要数分钟。模型配置使用远端 DSH 的设置，不自动复制本机密钥。' : '远端需 Python 3 和 Bash，不安装 DSH。模型沿用本机配置；使用 Native 工具模式。后台任务、原生终端、PTC 和子代理请使用全量模式。'}</p><button type="submit" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || inspecting}>{state.pending.includes('add') ? full ? '部署并连接中…' : '连接中…' : '添加到工作区'}</button></div>
+      <div className="dsh-ssh__form-footer"><p>{full ? '远端需 Linux/WSL、Python 3、Bash 和网络访问。首次添加会部署远端 DSH，可能需要数分钟；模型配置使用远端环境，不自动复制本机密钥或插件。' : '远端需 Python 3 和 Bash，不安装 DSH。模型沿用本机配置；使用 Native 工具模式。后台任务、原生终端、PTC 和子代理请使用全量模式。'}</p><button type="submit" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || inspecting}>{state.pending.includes('add') ? full ? '部署并连接中…' : '连接中…' : '添加到工作区'}</button></div>
     </form>
   </section>
 }
@@ -819,6 +904,42 @@ function ManagerOverlay({ manager }: Injected) {
   const closeButton = useRef<HTMLButtonElement>(null)
   useEffect(() => { if (state.open) closeButton.current?.focus() }, [state.open])
   useEffect(() => { manager.open(); return () => manager.close() }, [manager])
+  useEffect(() => {
+    if (!state.open) return
+    const dialog = manager.getDialog()
+    if (!dialog) return
+    const dismissMenus = (except?: Node): void => {
+      for (const details of dialog.querySelectorAll<HTMLDetailsElement>('details[open]')) {
+        if (!except || !details.contains(except)) details.open = false
+      }
+    }
+    const onPointerDown = (event: Event): void => dismissMenus(event.target as Node)
+    const onClick = (event: Event): void => {
+      if ((event.target as Element).closest('.dsh-ssh__more-actions button')) dismissMenus()
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      const open = [...dialog.querySelectorAll<HTMLDetailsElement>('details[open]')]
+      if (open.length) {
+        event.preventDefault()
+        event.stopPropagation()
+        for (const details of open) details.open = false
+        return
+      }
+      if (manager.escape()) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    }
+    dialog.addEventListener('pointerdown', onPointerDown)
+    dialog.addEventListener('click', onClick)
+    dialog.addEventListener('keydown', onKeyDown)
+    return () => {
+      dialog.removeEventListener('pointerdown', onPointerDown)
+      dialog.removeEventListener('click', onClick)
+      dialog.removeEventListener('keydown', onKeyDown)
+    }
+  }, [state.open, manager])
   if (!state.open) return null
   return <div className="dsh-ssh dsh-ssh--panel">
     <div className="dsh-ssh__dialog" ref={manager.bindDialog} role="region" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1}>

@@ -648,3 +648,56 @@ test('a missing full registration offers explicit re-add with the original direc
     assert.equal(fixture.calls.filter(call => call.method === 'add').length, 0, 'opening recovery never writes before explicit add')
   } finally { await fixture.dispose() }
 })
+
+const keydown = async (element, key) => {
+  await act(async () => { element.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) })
+}
+
+test('Escape closes menus and inner layers before leaving the project list intact', async () => {
+  const fixture = await mount({ initialSaved: [groupedRow('api')] })
+  try {
+    await click(button('远程工作区'))
+    const dialog = document.querySelector('[role="region"]')
+    await click(button('添加项目'))
+    assert.ok(document.querySelector('.dsh-ssh__new'))
+    await keydown(dialog, 'Escape')
+    assert.equal(document.querySelector('.dsh-ssh__new'), null)
+    assert.ok(document.querySelector('.dsh-ssh__saved'))
+
+    const row = document.querySelector('[data-project-id=api]')
+    const menu = row.querySelector('details.dsh-ssh__more')
+    menu.open = true
+    await act(async () => { document.querySelector('.dsh-ssh__header').dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true })) })
+    assert.equal(menu.open, false, 'clicking outside a menu dismisses it')
+    menu.open = true
+    await keydown(dialog, 'Escape')
+    assert.equal(menu.open, false, 'Escape dismisses an open menu first')
+    assert.ok(document.querySelector('.dsh-ssh__saved'))
+
+    await click(button('设置 api 的连接模式'))
+    assert.ok(document.querySelector('.dsh-ssh__credentials'))
+    await keydown(dialog, 'Escape')
+    assert.equal(document.querySelector('.dsh-ssh__credentials'), null)
+    assert.ok(document.querySelector('.dsh-ssh__saved'), 'Escape never closes the whole panel from the root view')
+  } finally { await fixture.dispose() }
+})
+
+test('remote directory breadcrumbs jump to any ancestor path', async () => {
+  const fixture = await mount()
+  try {
+    await click(button('远程工作区'))
+    await click(button('WSL'))
+    await input('path', '/home/test/project')
+    await click(button('浏览目录'))
+    const crumbs = () => [...document.querySelectorAll('.dsh-ssh__crumbs button')]
+    assert.deepEqual(crumbs().map(item => item.textContent), ['/', 'home', 'test', 'project'])
+    assert.equal(crumbs().at(-1).disabled, true, 'the current directory is not a navigation target')
+    await click(crumbs().find(item => item.textContent === 'home'))
+    assert.equal(fixture.calls.filter(call => call.method === 'browse').at(-1).input.path, '/home')
+    assert.equal(document.querySelector('input[id$="-path"]').value, '/home')
+    assert.ok(document.querySelector('.dsh-ssh__browser'), 'breadcrumb navigation keeps the browser open')
+    await click(button('上一级'))
+    assert.equal(fixture.calls.filter(call => call.method === 'browse').at(-1).input.path, '/')
+    assert.ok(button('subproject'))
+  } finally { await fixture.dispose() }
+})
