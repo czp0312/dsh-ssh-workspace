@@ -1,0 +1,52 @@
+# Dependencies and generated packages
+node_modules/
+.npm/
+.pnpm-store/
+lib/
+dist/
+build/
+coverage/
+*.tgz
+*.tsbuildinfo
+
+# Local references, integration-test data and compiler caches
+/.reference/
+/.test-artifacts/
+/tsx-*/
+.cache/
+.dsh/
+
+# Environment files, SSH credentials and local connection state
+.env
+.env.*
+!.env.example
+!.env.*.example
+.ssh/
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+*.pub
+id_rsa*
+id_ed25519*
+known_hosts*
+ssh-workspaces.json
+ssh-backends.json
+backend.json
+
+# Logs, temporary files and backups
+logs/
+*.log
+*.log.*
+*.tmp
+*.bak
+*.swp
+*~
+
+# Machine-specific editor and OS files
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+Desktop.ini

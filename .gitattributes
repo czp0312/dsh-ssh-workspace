@@ -1,0 +1,2 @@
+# Keep source files consistent across Windows, WSL and Linux checkouts.
+* text=auto eol=lf
