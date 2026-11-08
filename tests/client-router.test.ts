@@ -10,13 +10,16 @@ const abort = (signal: AbortSignal): Promise<never> => new Promise((_, reject) =
   if (signal.aborted) stop()
 })
 
-function fixture() {
+function fixture(options: { localControlReady?: Promise<void>; offlineControl?: boolean; lateServices?: boolean } = {}) {
   const native = { workspaceId: 'local-workspace', title: 'Local', path: 'C:\\project', sessionIds: ['local-session'] }
   const remote = { workspaceId: 'remote-workspace', title: 'Remote', path: '/project', sessionIds: ['same-session'] }
   const records: any[] = [{ backendId: 'host-a', workspaceId: remoteId('host-a', remote.workspaceId), workspace: remote }]
   const calls: any[] = []
   const uploads: any[] = []
   const eventFrames: any[] = []
+  const controlFrames: any[] = []
+  const pendingServices = new Map<string, (ctx: any) => () => void>()
+  const serviceCleanup: Array<() => void> = []
   const streams = new Map<string, any[]>()
   let count = 0
   let reconnects = 0
@@ -33,11 +36,12 @@ function fixture() {
       return success({ result: success({ sessionId: 'same-session' }), attachments: [] })
     }
     if (endpoint === 'dsh-ssh-workspaces/backend/open') {
+      if (payload.endpoint === 'session/control' && options.offlineControl) throw new Error('remote control offline')
       const id = `stream-${++count}`
       streams.set(id, payload.endpoint === '$events'
         ? [{ type: 'item', value: { type: 'ready', clientId: 'remote-client', host: { home: '/home/remote' } } }, ...eventFrames.map(value => ({ type: 'item', value }))]
         : payload.endpoint === 'session/control'
-          ? [{ type: 'item', value: { type: 'baseline', value: { projections: { 'same-session': { asOfSeq: 1, values: { title: 'Remote' } } } } } }]
+          ? [{ type: 'item', value: { type: 'baseline', value: { projections: { 'same-session': { asOfSeq: 1, values: { title: 'Remote' } } } } } }, ...controlFrames.map(value => ({ type: 'item', value }))]
         : payload.endpoint === 'workspace/follow'
           ? [{ type: 'item', value: { type: 'baseline', value: { items: [remote, { ...remote, workspaceId: 'unregistered', title: 'Hidden' }], archivedSessionIds: [], pinnedSessionIds: [] } } }]
           : [{ type: 'item', value: { type: 'snapshot', info: { id: 'terminal-1', cwd: '/project' } } }])
@@ -52,18 +56,21 @@ function fixture() {
     if (endpoint === 'session/list') return success({ items: [] })
     return success({ local: true })
   }
-  const originalOpen = async function* (_channel: string, endpoint: string, _payload: unknown, signal: AbortSignal, _uplink?: AsyncIterable<unknown>) {
+  const originalOpen = async function* (_channel: string, endpoint: string, _payload: unknown, signal: AbortSignal, _uplink?: AsyncIterable<unknown>): AsyncGenerator<any, void> {
     if (endpoint === '$events') yield { type: 'ready', clientId: 'local-client', host: { home: 'C:\\Users\\test' } }
-    else if (endpoint === 'session/control') yield { type: 'baseline', value: { projections: { 'local-session': { asOfSeq: 1, values: { title: 'Local' } } } } }
+    else if (endpoint === 'session/control') {
+      if (options.localControlReady) await Promise.race([options.localControlReady, abort(signal)])
+      yield { type: 'baseline', value: { projections: { 'local-session': { asOfSeq: 1, values: { title: 'Local' } } } } }
+    }
     else if (endpoint === 'workspace/follow') yield { type: 'baseline', value: { items: [native], archivedSessionIds: [], pinnedSessionIds: [] } }
     else yield { local: true }
     await abort(signal)
   }
   const rpc = { call: originalCall, open: originalOpen }
-  const context = { connection: { rpc, openWebSocket() { throw new Error('Native logical streams should be retained') }, reconnect() { reconnects++ } }, get(name: string) { return name === 'uiWorkspace' ? navigation : name === 'fileUpload' ? upload : undefined }, emit() {} }
+  const context = { connection: { rpc, openWebSocket() { throw new Error('Native logical streams should be retained') }, reconnect() { reconnects++ } }, get(name: string) { return name === 'uiWorkspace' ? navigation : name === 'fileUpload' ? upload : undefined }, emit() {}, ...(options.lateServices ? { inject(services: string[], setup: (ctx: any) => () => void) { pendingServices.set(services[0]!, setup) } } : {}) }
   const router = installBackendRouter(context)!
   const ready = () => router.refresh()
-  return { rpc, router, ready, navigation, upload, uploads, calls, records, eventFrames, get reconnects() { return reconnects }, fail() { broken = true }, disconnect() { enabled = false; for (const row of records) row.disconnected = true } }
+  return { rpc, router, ready, navigation, upload, uploads, calls, records, eventFrames, controlFrames, provideServices() { for (const setup of pendingServices.values()) serviceCleanup.push(setup(context)); pendingServices.clear() }, withdrawServices() { serviceCleanup.splice(0).forEach(dispose => dispose()) }, get reconnects() { return reconnects }, fail() { broken = true }, disconnect() { enabled = false; for (const row of records) row.disconnected = true } }
 }
 
 test('router isolates local and remote calls across project switches and never falls back on a remote failure', async () => {
@@ -79,6 +86,10 @@ test('router isolates local and remote calls across project switches and never f
     assert.equal(f.calls.at(-1).payload.endpoint, 'llm/listProviders')
     await f.rpc.call('/api', 'pluginInventory/list', { args: {} })
     assert.equal(f.calls.at(-1).endpoint, 'pluginInventory/list')
+    await f.rpc.call('/api', 'dynamicCordisRunner/syncInspectManifest', { args: {} })
+    assert.equal(f.calls.at(-1).endpoint, 'dynamicCordisRunner/syncInspectManifest')
+    await f.rpc.call('/api', 'remoteAccess/follow', { args: {} })
+    assert.equal(f.calls.at(-1).endpoint, 'remoteAccess/follow')
     f.navigation.openSession({ kind: 'subagent', parentSessionId: remoteId('host-a', 'same-session'), childSessionId: remoteId('host-a', 'child') })
     f.fail()
     const before = f.calls.length
@@ -96,6 +107,7 @@ test('manually disconnected remote folders remain in the sidebar without startin
   const controller = new AbortController()
   try {
     await f.ready()
+    assert.equal(f.reconnects, 0, 'initial routing must not reset native Session startup')
     f.disconnect(); await f.router.refresh()
     const before = f.calls.length
     const stream = f.rpc.open('/api', 'workspace/follow', { args: {} }, controller.signal)[Symbol.asyncIterator]()
@@ -180,17 +192,99 @@ test('terminal uplink and Blob uploads reuse the desktop carrier and restore hoo
   assert.notEqual(f.upload.post, post) // post was the wrapped method at fixture return.
 })
 
-test('host-wide Session control includes local and remote projections with namespaced record keys', async () => {
+test('native Session control receives one merged baseline before live remote projection updates', async () => {
   const f = fixture()
+  f.controlFrames.push({ type: 'projection', sessionId: 'same-session', seq: 2, changes: [{ key: 'title', val: 'Updated remote' }] })
   const controller = new AbortController()
   try {
     await f.ready()
     const stream = f.rpc.open('/api', 'session/control', { args: {} }, controller.signal)[Symbol.asyncIterator]()
     const first: any = (await stream.next()).value
+    assert.equal(first.type, 'baseline')
     assert.equal(first.value.projections['local-session'].values.title, 'Local')
+    assert.equal(first.value.projections[remoteId('host-a', 'same-session')].values.title, 'Remote')
+    assert.equal(first.value.projections['same-session'], undefined)
     const second: any = (await stream.next()).value
-    assert.equal(second.value.projections[remoteId('host-a', 'same-session')].values.title, 'Remote')
-    assert.equal(second.value.projections['same-session'], undefined)
+    assert.equal(second.type, 'projection')
+    assert.equal(second.sessionId, remoteId('host-a', 'same-session'))
+    assert.equal(second.changes[0].val, 'Updated remote')
     await stream.return?.()
   } finally { controller.abort(); f.router.dispose() }
+})
+
+test('control buffers early remote updates until the local opening snapshot arrives', async () => {
+  const ready = Promise.withResolvers<void>()
+  const f = fixture({ localControlReady: ready.promise })
+  f.controlFrames.push({ type: 'projection', sessionId: 'same-session', seq: 2, changes: [{ key: 'title', val: 'Early update' }] })
+  const controller = new AbortController()
+  try {
+    await f.ready()
+    const stream = f.rpc.open('/api', 'session/control', { args: {} }, controller.signal)[Symbol.asyncIterator]()
+    const opening = stream.next()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    ready.resolve()
+    const baseline: any = (await opening).value
+    assert.equal(baseline.type, 'baseline')
+    assert.equal(Object.keys(baseline.value.projections).length, 2)
+    assert.equal((await stream.next()).value.changes[0].val, 'Early update')
+    await stream.return?.()
+  } finally { controller.abort(); f.router.dispose() }
+})
+
+test('an unavailable remote control stream does not block the local Session baseline', async () => {
+  const f = fixture({ offlineControl: true })
+  const controller = new AbortController()
+  try {
+    await f.ready()
+    const stream = f.rpc.open('/api', 'session/control', { args: {} }, controller.signal)[Symbol.asyncIterator]()
+    const first: any = (await stream.next()).value
+    assert.equal(first.type, 'baseline')
+    assert.deepEqual(Object.keys(first.value.projections), ['local-session'])
+    await stream.return?.()
+  } finally { controller.abort(); f.router.dispose() }
+})
+
+test('catalog changes end an existing subscription as a retryable carrier generation', async () => {
+  const f = fixture()
+  const controller = new AbortController()
+  try {
+    await f.ready()
+    const stream = f.rpc.open('/api', 'workspace/follow', { args: {} }, controller.signal)[Symbol.asyncIterator]()
+    await stream.next(); await stream.next()
+    const pending = stream.next()
+    const failure = assert.rejects(pending, (error: any) => error.dshRemoteStreamFailure?.kind === 'carrier')
+    f.disconnect(); await f.router.refresh(); await failure
+    const replacement = f.rpc.open('/api', 'workspace/follow', { args: {} }, controller.signal)[Symbol.asyncIterator]()
+    assert.ok((await replacement.next()).value.value.items.some((row: any) => row.workspaceId === remoteId('host-a', 'remote-workspace')))
+    await replacement.return?.()
+  } finally { controller.abort(); f.router.dispose() }
+})
+
+test('adding a native lightweight folder does not interrupt existing remote sessions', async () => {
+  const f = fixture()
+  try {
+    await f.ready()
+    f.records.push({ workspaceId: 'native-lightweight', mode: 'light' })
+    await f.router.refresh()
+    assert.equal(f.reconnects, 0)
+  } finally { f.router.dispose() }
+})
+
+test('routing starts before UI services and attaches navigation and upload hooks when they arrive', async () => {
+  const f = fixture({ lateServices: true })
+  const originalNavigation = f.navigation.openSession
+  const originalUpload = f.upload.post
+  try {
+    await f.ready()
+    assert.equal(f.navigation.openSession, originalNavigation)
+    f.provideServices()
+    f.navigation.openSession(remoteId('host-a', 'same-session'))
+    await f.rpc.call('/api', 'llm/listProviders', { args: {} })
+    assert.equal(f.calls.at(-1).payload.backendId, 'host-a')
+    await f.upload.post({ path: 'api/session/uploadFileBinary?sessionId=' + encodeURIComponent(remoteId('host-a', 'same-session')), body: new Blob(['test']) })
+    assert.ok(f.uploads[0].path.startsWith('api/dsh-ssh-workspaces/backend/upload?'))
+    f.withdrawServices()
+    assert.equal(f.navigation.openSession, originalNavigation)
+    assert.equal(f.upload.post, originalUpload)
+  } finally { f.withdrawServices(); f.router.dispose() }
 })

@@ -41,7 +41,7 @@ async function mount({ respond, initialSaved = [], hostPaths } = {}) {
     assert.ok(['react', 'react/jsx-runtime'].includes(id), `Unexpected browser dependency: ${id}`)
     return require(id)
   })
-  assert.deepEqual(Array.from(plugin.inject), ['connection', 'slots', 'uiWorkspace', 'layout', 'fileUpload'])
+  assert.deepEqual(Array.from(plugin.inject), ['connection'])
   assert.equal(typeof plugin.apply, 'function')
   let main
   const selectPanel = id => {

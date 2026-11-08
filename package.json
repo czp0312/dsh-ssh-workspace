@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-workspaces",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "SSH and WSL projects in the native DeepSeek Harness sidebar, in the current window",
   "type": "module",
   "license": "MIT",
@@ -37,6 +37,9 @@
     "lib/types/src/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
+    "docs/",
+    "screenshots.json",
+    "AGENTS.md",
     "LICENSE"
   ],
   "keywords": [
@@ -59,12 +62,7 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-workspace",
-        "@deepseek-ai/dsh-client-file-upload"
+        "@deepseek-ai/dsh-client-connection"
       ]
     }
   },

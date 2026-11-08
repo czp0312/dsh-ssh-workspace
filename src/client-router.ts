@@ -4,7 +4,7 @@ import type { WorkspaceView } from './types.js'
 
 type Rpc = (channel: string, endpoint: string, payload: any, signal?: AbortSignal) => Promise<any>
 type Open = (channel: string, endpoint: string, payload: any, signal: AbortSignal, uplink?: AsyncIterable<unknown>) => AsyncIterable<any>
-interface RouterContext { connection: { rpc: { call: Rpc; open?: Open }; openWebSocket?(path: string): ConnectionWebSocket; reconnect?(): void }; get(name: string): any; emit?(event: string): unknown }
+interface RouterContext { connection: { rpc: { call: Rpc; open?: Open }; openWebSocket?(path: string): ConnectionWebSocket; reconnect?(): void }; get(name: string): any; emit?(event: string): unknown; inject?(services: string[], setup: (ctx: RouterContext) => () => void): unknown }
 
 class Queue<T> {
   values: T[] = []
@@ -32,12 +32,12 @@ class NativeMux {
     return this.ready ??= new Promise<void>((resolve, reject) => {
       const socket = this.openSocket('/api/remote.mux'); this.socket = socket
       socket.addEventListener('open', () => resolve(), { once: true })
-      socket.addEventListener('error', () => reject(new Error('Local DSH stream connection failed')), { once: true })
+      socket.addEventListener('error', () => reject(carrierError('Local DSH stream connection failed')), { once: true })
       socket.addEventListener('message', event => {
         try { const frame = JSON.parse(String(event.data)); this.inboxes.get(frame.streamId)?.push(frame) }
         catch { for (const inbox of this.inboxes.values()) inbox.fail(new Error('Invalid DSH stream frame')) }
       })
-      socket.addEventListener('close', () => { this.ready = undefined; for (const inbox of this.inboxes.values()) inbox.fail(new Error('DSH stream disconnected')) }, { once: true })
+      socket.addEventListener('close', () => { this.ready = undefined; for (const inbox of this.inboxes.values()) inbox.fail(carrierError('DSH stream disconnected')) }, { once: true })
     }).catch(error => { this.ready = undefined; throw error })
   }
   async *open(endpoint: string, payload: any, signal: AbortSignal, uplink?: AsyncIterable<unknown>): AsyncGenerator<any> {
@@ -60,6 +60,7 @@ class NativeMux {
   close(): void { this.socket?.close(); this.ready = undefined; for (const inbox of this.inboxes.values()) inbox.fail(new Error('Router disposed')); this.inboxes.clear() }
 }
 const streamError = (failure: any): Error => Object.assign(new Error(failure?.message || 'Remote DSH stream failed'), { dshRemoteStreamFailure: { kind: 'remote', code: failure?.code || 'internal', details: failure?.details || {} } })
+const carrierError = (message: string): Error => Object.assign(new Error(message), { dshRemoteStreamFailure: { kind: 'carrier' } })
 
 export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces: WorkspaceView[]) => void): { refresh(force?: boolean): Promise<void>; dispose(): void } | undefined {
   if (!ctx.connection.openWebSocket || !ctx.connection.reconnect) return
@@ -70,13 +71,14 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
   const localMux = new NativeMux(path => ctx.connection.openWebSocket!(path))
   const localOpen: Open = originalOpen?.bind(rpc) ?? ((_channel, endpoint, payload, signal, uplink) => localMux.open(endpoint, payload, signal, uplink))
   const lifetime = new AbortController()
+  let catalogLifetime = new AbortController()
   let sources: string[] = []
   let records: any[] = []
   let active: string | undefined
   let catalog = ''
   let refreshSequence = 0
   const eventClients = new Map<string, string>()
-  const localOnly = /^(?:dsh-ssh-workspaces\/|productAnalytics\/|plugins\/|pluginManager\/|pluginInventory\/|pluginMarket\/|pluginRegistryProbe\/|cordis\/|account\/)/
+  const localOnly = /^(?:dsh-ssh-workspaces\/|productAnalytics\/|plugins\/|pluginManager\/|pluginInventory\/|pluginMarket\/|pluginRegistryProbe\/|cordis\/|dynamicCordisRunner\/|account\/|remoteAccess\/)/
   const manage = async (endpoint: string, input: any, signal?: AbortSignal): Promise<any> => {
     const result = await originalCall('/api', `dsh-ssh-workspaces/${endpoint}`, input, signal)
     if (!result.ok) throw new Error(result.error.message)
@@ -89,8 +91,14 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
     const next: string[] = status.sources ?? []
     records = status.workspaces ?? []
     onCatalog?.(records)
-    const key = JSON.stringify([next, records.map(row => [row.backendId, row.workspaceId])])
-    if (force || key !== catalog) { catalog = key; sources = next; ctx.connection.reconnect!() }
+    const key = JSON.stringify([next, records.filter(row => row.backendId).map(row => [row.backendId, row.workspaceId])])
+    if (force || key !== catalog) {
+      const connectedCatalog = catalog !== ''
+      catalog = key; sources = next
+      const previous = catalogLifetime; catalogLifetime = new AbortController()
+      previous.abort(carrierError('Remote workspace catalog changed'))
+      if (connectedCatalog) ctx.connection.reconnect!()
+    }
   }
   const initialized = refresh().catch(error => { if (!lifetime.signal.aborted) console.error('Remote backend catalog:', error instanceof Error ? error.message : 'unavailable') })
   async function remoteCall(source: string, endpoint: string, payload: any, signal?: AbortSignal): Promise<any> {
@@ -150,23 +158,28 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
     if (active !== source) { active = source; ctx.emit?.('connection/reset') }
   }
   const restorations: Array<() => void> = []
-  const navigation = ctx.get('uiWorkspace')
-  for (const method of ['startSession', 'openSession', 'openWorkspace']) {
-    if (typeof navigation?.[method] !== 'function') continue
-    const original = navigation[method]
-    const wrapped = function(this: unknown, target: unknown, ...args: unknown[]) {
-      const source = typeof target === 'string' ? idSource(target) : payloadSource(target)
-      const paused = records.some(record => record.disconnected && ((method === 'startSession' && record.workspaceId === target) || (source && record.backendId === source)))
-      if (paused) { ctx.get('layout')?.selectPanel('dsh-ssh-workspaces'); return }
-      select(target); return original.call(this, target, ...args)
+  const hookNavigation = (owner: RouterContext) => {
+    const navigation = owner.get('uiWorkspace')
+    const restore: Array<() => void> = []
+    for (const method of ['startSession', 'openSession', 'openWorkspace']) {
+      if (typeof navigation?.[method] !== 'function') continue
+      const original = navigation[method]
+      const wrapped = function(this: unknown, target: unknown, ...args: unknown[]) {
+        const source = typeof target === 'string' ? idSource(target) : payloadSource(target)
+        const paused = records.some(record => record.disconnected && ((method === 'startSession' && record.workspaceId === target) || (source && record.backendId === source)))
+        if (paused) { ctx.get('layout')?.selectPanel('dsh-ssh-workspaces'); return }
+        select(target); return original.call(this, target, ...args)
+      }
+      navigation[method] = wrapped
+      restore.push(() => { navigation[method] = original })
     }
-    navigation[method] = wrapped
-    restorations.push(() => { navigation[method] = original })
+    return () => restore.forEach(dispose => dispose())
   }
   // FileUpload owns the desktop-authenticated raw carrier. Reuse it instead of
   // sending Blob uploads to a local Session with the same opaque identity.
-  const upload = ctx.get('fileUpload')
-  if (typeof upload?.post === 'function') {
+  const hookUpload = (owner: RouterContext) => {
+    const upload = owner.get('fileUpload')
+    if (typeof upload?.post !== 'function') return () => {}
     const original = upload.post
     upload.post = function(this: unknown, request: any) {
       const url = new URL(request.path, 'http://dsh.invalid/')
@@ -180,8 +193,14 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
       }
       return original.call(this, request)
     }
-    restorations.push(() => { upload.post = original })
+    return () => { upload.post = original }
   }
+  // Install the carrier before native controllers subscribe. Navigation and
+  // uploads arrive later and own separate dependency-scoped hook lifetimes.
+  if (ctx.inject) {
+    ctx.inject(['uiWorkspace'], hookNavigation)
+    ctx.inject(['fileUpload'], hookUpload)
+  } else restorations.push(hookNavigation(ctx), hookUpload(ctx))
   rpc.call = async (channel, endpoint, payload, signal) => {
     if (channel !== '/api' || localOnly.test(endpoint)) return originalCall(channel, endpoint, payload, signal)
     await initialized
@@ -198,8 +217,10 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
     await initialized
     if (endpoint === 'workspace/follow' || endpoint === '$events' || endpoint === 'session/control') {
       const inbox = new Queue<{ source: string; value: any }>()
-      const scope = new AbortController(); const combined = AbortSignal.any([signal, scope.signal, lifetime.signal])
+      const scope = new AbortController(); const combined = AbortSignal.any([signal, scope.signal, lifetime.signal, catalogLifetime.signal])
       const states = new Map<string, any>()
+      const controlSources = new Set(['', ...sources])
+      const controlSnapshots = new Map<string, any>()
       const empty = () => ({ items: [], archivedSessionIds: [], pinnedSessionIds: [] })
       // Cached folders remain visible when manually disconnected. Only enabled
       // sources receive live subscriptions, so polling cannot undo a disconnect.
@@ -215,6 +236,7 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
           } catch (error) {
             if (combined.aborted) return
             if (!source) { inbox.fail(error); return }
+            if (endpoint === 'session/control') inbox.push({ source, value: { type: 'source-unavailable' } })
             if (attempt === 0) console.warn('Remote backend disconnected:', source)
           }
           // Retry subscriptions only; never replay a submitted prompt or tool.
@@ -238,8 +260,21 @@ export function installBackendRouter(ctx: RouterContext, onCatalog?: (workspaces
             continue
           }
           if (endpoint === 'session/control') {
-            if (!item.source && item.value.type === 'baseline') { baseline = true; yield item.value; yield* buffered.splice(0) }
-            else if (baseline) yield item.value; else buffered.push(item.value)
+            if (item.value.type === 'baseline' || item.value.type === 'source-unavailable') {
+              if (item.value.type === 'baseline') {
+                // Each native stream generation accepts exactly one baseline.
+                // A recovered source needs a new merged generation, not another
+                // opening snapshot inserted among live projection updates.
+                if (baseline) throw carrierError('Remote Session control source recovered')
+                controlSnapshots.set(item.source, item.value.value.projections)
+              }
+              controlSources.delete(item.source)
+              if (!baseline && controlSources.size === 0) {
+                baseline = true
+                yield { type: 'baseline', value: { projections: Object.assign({}, ...controlSnapshots.values()) } }
+                yield* buffered.splice(0)
+              }
+            } else if (baseline) yield item.value; else buffered.push(item.value)
             continue
           }
           const state = states.get(item.source) ?? empty(); const frame = item.value

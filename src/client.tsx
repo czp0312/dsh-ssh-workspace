@@ -45,6 +45,7 @@ interface ClientContext {
     }, component: ComponentType<P>): Disposer
   }
   get(name: string): any
+  inject?(services: string[], setup: (ctx: ClientContext) => void): unknown
   effect(setup: () => void | Disposer, label?: string): unknown
 }
 
@@ -571,7 +572,7 @@ function ManagerOverlay({ manager }: Injected) {
 }
 
 /** Public client services only; uiWorkspace is resolved on use for optional navigation. */
-export const inject = ['connection', 'slots', 'uiWorkspace', 'layout', 'fileUpload']
+export const inject = ['connection']
 
 export function apply(context: unknown): void {
   const ctx = context as ClientContext
@@ -605,10 +606,14 @@ export function apply(context: unknown): void {
     return () => { style.remove() }
   }, 'dsh-ssh-workspaces: stylesheet')
   ctx.effect(() => () => manager!.destroy(), 'dsh-ssh-workspaces: manager lifetime')
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-    name: 'sidebar.panellist', id: 'dsh-ssh-workspaces', label: '远程工作区', order: 25, inject: () => ({}),
-  }, ConnectionIcon))
-  ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', id: 'dsh-ssh-workspaces', key: 'dsh-ssh-workspaces', order: 60, inject: injected,
-  }, ManagerOverlay))
+  const mountSlots = (ui: ClientContext) => {
+    ui.slots.inject('sidebar.panellist', () => ui.slots.register({
+      name: 'sidebar.panellist', id: 'dsh-ssh-workspaces', label: '远程工作区', order: 25, inject: () => ({}),
+    }, ConnectionIcon))
+    ui.slots.inject('main', () => ui.slots.register({
+      name: 'main', id: 'dsh-ssh-workspaces', key: 'dsh-ssh-workspaces', order: 60, inject: injected,
+    }, ManagerOverlay))
+  }
+  if (ctx.inject) ctx.inject(['slots'], mountSlots)
+  else mountSlots(ctx)
 }
