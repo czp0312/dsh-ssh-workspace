@@ -5,6 +5,7 @@ interface Connections {
   list(): WorkspaceView[]
   add(input: unknown, signal?: AbortSignal): Promise<SavedWorkspace>
   reconnect(id: string, signal?: AbortSignal): Promise<SavedWorkspace>
+  connectProject?(id: string, signal?: AbortSignal): Promise<SavedWorkspace>
   disconnect(id: string): Promise<void>
   remove(id: string): Promise<void>
   checkHealth?(signal: AbortSignal): Promise<void>
@@ -37,7 +38,7 @@ export class WorkspaceConnections {
       const destination = options.mode === 'light' ? this.light : this.full
       const existing = destination.findTarget?.(record.target) ?? destination.list().find(row => targetKey(row.target) === targetKey(record.target))
       // Modes own separate Session stores. Never rewrite a running Session's identity/cwd.
-      const result = existing ? await destination.reconnect(existing.id, signal) : await destination.add({ target: record.target, title: record.title, mode: options.mode, ...(options.mode === 'light' && options.localPath ? { localPath: options.localPath } : {}) }, signal)
+      const result = existing ? await (destination.connectProject?.(existing.id, signal) ?? destination.reconnect(existing.id, signal)) : await destination.add({ target: record.target, title: record.title, mode: options.mode, ...(options.mode === 'light' && options.localPath ? { localPath: options.localPath } : {}) }, signal)
       return { ...result, mode: options.mode }
     }
     return { ...await manager.reconnect(id, signal), mode }

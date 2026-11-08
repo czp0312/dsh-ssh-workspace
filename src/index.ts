@@ -156,6 +156,16 @@ export async function apply(ctx: Context, config: PluginConfig = {}): Promise<vo
           value = await connections.reconnect(id, signal, object(payload) as unknown as ReconnectRequest); break
         }
         case 'disconnect': await connections.disconnect(idOf(payload)); value = null; break
+        case 'connection/reconnect': {
+          const id = idOf(payload)
+          const record = backends.list().find(row => row.id === id)
+          if (!record) throw new Error('全量连接不存在，请刷新列表。')
+          const request = object(payload)
+          if (request.force !== undefined && typeof request.force !== 'boolean') throw new Error('无效的重连选项。')
+          transport.setCredentials(record.target, request.credentials)
+          await backends.reconnectConnection(id, signal, request.force === true)
+          value = null; break
+        }
         case 'remove': await connections.remove(idOf(payload)); value = null; break
         case 'backend/rpc': {
           const request = object(payload)

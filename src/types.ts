@@ -44,6 +44,21 @@ export interface DockerHost { context?: string; via?: SshTarget }
 export interface DockerContainer { id: string; name: string; image: string; state: string; status: string }
 export type RemoteTarget = WslTarget | SshTarget | DockerTarget
 
+/** Stable identity of a host/container, excluding its user and project directory. */
+export function environmentKey(target: RemoteTarget): string {
+  if (target.kind === 'wsl') {
+    return JSON.stringify(['wsl', target.distribution.toLowerCase()])
+  }
+  if (target.kind === 'ssh') {
+    // An omitted SSH port is resolved from config; it need not be 22.
+    return JSON.stringify(['ssh', target.host.toLowerCase(), target.port ?? null])
+  }
+  return JSON.stringify([
+    'docker', target.context ?? '', target.via ? environmentKey({ ...target.via, remotePath: '/' }) : '',
+    target.container,
+  ])
+}
+
 export function sshTarget(target: RemoteTarget): SshTarget | undefined {
   return target.kind === 'ssh' ? target : target.kind === 'docker' ? target.via : undefined
 }
@@ -94,6 +109,10 @@ export interface SavedWorkspace {
 }
 
 export interface WorkspaceView extends SavedWorkspace {
+  /** Full-mode backend identity; absent for lightweight projects. */
+  backendId?: string
+  /** Transport health is independent of an individual directory registration. */
+  backendHealth?: ConnectionHealth
   registered: boolean
   connectionState?: ConnectionState
   connectionError?: string

@@ -42,12 +42,14 @@ class FakeWire extends BackendWire {
 
 class TestBackends extends RemoteBackends {
   starts = 0
+  startedPaths: string[] = []
   wires: FakeWire[] = []
   native = new Map<string, any>()
   tunnelCloses = 0
   onStart?: (signal: AbortSignal) => Promise<void>
   protected override async createConnection(_target: RemoteTarget, signal: AbortSignal): Promise<RunningBackend> {
     this.starts++
+    this.startedPaths.push(_target.remotePath)
     await this.onStart?.(signal)
     const wire = new FakeWire(this.native); this.wires.push(wire)
     return { wire, tunnel: { close: async () => { this.tunnelCloses++ } } }
@@ -186,4 +188,29 @@ test('a stale health snapshot cannot mark a concurrently added project as missin
   release.resolve()
   await checking
   assert.equal(backend.list().find(row => row.id === added.id)!.registered, true)
+})
+
+test('connection reconnect tolerates missing directories without recreating them', async t => {
+  const { backend } = await fixture(t)
+  const a = await backend.add({ target })
+  const b = await backend.add({ target: { ...target, remotePath: '/project-b' } })
+  backend.native.delete(a.workspace.workspaceId)
+  await backend.disconnect(a.id)
+  await backend.reconnectConnection(a.id)
+  assert.equal(backend.startedPaths.at(-1), '/')
+  const rows = backend.list()
+  assert.equal(rows.find(row => row.id === a.id)!.registered, false)
+  assert.equal(rows.find(row => row.id === a.id)!.backendHealth!.connectionState, 'connected')
+  assert.equal(rows.find(row => row.id === b.id)!.online, true)
+  assert.equal(backend.native.has(a.workspace.workspaceId), false)
+  assert.equal(rows.find(row => row.id === b.id)!.workspaceId, b.workspaceId)
+  const starts = backend.starts
+  await backend.connectProject(b.id)
+  assert.equal(backend.starts, starts, 'selecting an existing full project leaves siblings connected')
+  await assert.rejects(backend.connectProject(a.id), /重新添加目录/)
+  assert.equal(backend.starts, starts, 'an invalid registration cannot force a healthy sibling to reconnect')
+  await backend.reconnectConnection(b.id)
+  assert.equal(backend.starts, starts, 'Connect keeps an already healthy transport')
+  await backend.reconnectConnection(b.id, undefined, true)
+  assert.equal(backend.starts, starts + 1, 'explicit Reconnect replaces the transport')
 })

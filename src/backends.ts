@@ -42,13 +42,14 @@ export class RemoteBackends {
       const snapshot = this.registrations.get(row.backendId)
       const remote = snapshot?.get(row.workspaceId)
       const registered = !snapshot || remote?.path === row.target.remotePath
-      const state = this.blocked(row.backendId) ? { connectionState: 'disconnected' as const }
-        : !registered ? { connectionState: 'error' as const, connectionError: '远端项目登记已不存在或已变化。请重新添加此目录；文件和旧会话保留，不会自动迁移历史。' }
+      const backendHealth = this.blocked(row.backendId) ? { connectionState: 'disconnected' as const }
         : this.health.get(row.backendId)?.connectionState === 'error' ? this.health.get(row.backendId)!
         : running && !running.wire.isStale ? { connectionState: 'connected' as const, checkedAt: this.health.get(row.backendId)?.checkedAt }
         : running?.wire.isStale ? { connectionState: 'error' as const, checkedAt: this.health.get(row.backendId)?.checkedAt, connectionError: this.health.get(row.backendId)?.connectionError ?? '远程连接已中断，请重新连接。' }
         : this.health.get(row.backendId) ?? { connectionState: 'disconnected' as const }
-      return { ...row, ...(remote && registered ? { workspace: remote } : {}), registered, ...state, online: state.connectionState === 'connected', sharedConnectionCount: this.records.filter(item => item.backendId === row.backendId && item.removedAt === undefined).length }
+      const state = !registered && backendHealth.connectionState === 'connected'
+        ? { connectionState: 'error' as const, connectionError: '远端项目登记已不存在或已变化。请重新添加此目录；文件和旧会话保留，不会自动迁移历史。' } : backendHealth
+      return { ...row, ...(remote && registered ? { workspace: remote } : {}), registered, backendHealth, ...state, online: state.connectionState === 'connected', sharedConnectionCount: this.records.filter(item => item.backendId === row.backendId && item.removedAt === undefined).length }
     }))
   }
   sources(): string[] { return [...new Set(this.records.filter(row => row.removedAt === undefined && !this.blocked(row.backendId)).map(row => row.backendId))] }
@@ -164,18 +165,29 @@ export class RemoteBackends {
     return structuredClone(record)
   }
   async reconnect(id: string, signal?: AbortSignal): Promise<BackendProject> {
-    const record = this.records.find(row => row.id === id)
+    return this.connectProject(id, signal, true)
+  }
+
+  /** Entering a project's full mode must not reset its siblings' healthy tunnel. */
+  async connectProject(id: string, signal?: AbortSignal, force = false): Promise<BackendProject> {
+    const record = await this.reconnectConnection(id, signal, force)
+    if (!this.list().find(row => row.id === id)?.registered) throw new Error('远端项目登记已不存在或已变化。请使用“重新添加目录”；不会自动迁移旧会话。')
+    return record
+  }
+
+  /** A shared transport can reconnect even if its first directory was removed. */
+  async reconnectConnection(id: string, signal?: AbortSignal, force = false): Promise<BackendProject> {
+    const record = this.records.find(row => row.id === id && row.removedAt === undefined)
     if (!record) throw new Error('Remote project not found')
     const epoch = this.epochs.get(record.backendId) ?? 0
-    await this.closeRunning(record.backendId)
-    await this.ensure(record.target, record.backendId, signal, true)
+    if (force) await this.closeRunning(record.backendId)
+    await this.ensure({ ...record.target, remotePath: '/' }, record.backendId, signal, true)
     signal?.throwIfAborted()
     await this.publish(records => {
       if ((this.epochs.get(record.backendId) ?? 0) !== epoch) throw new Error('连接操作已取消。')
       return records.map(row => row.backendId === record.backendId ? this.resumed(row) : row)
     })
     if ((this.epochs.get(record.backendId) ?? 0) === epoch) this.paused.delete(record.backendId)
-    if (!this.list().find(row => row.id === id)?.registered) throw new Error('远端项目登记已不存在或已变化。请使用“重新添加目录”；不会自动迁移旧会话。')
     return this.resumed(record)
   }
   private resumed(record: BackendProject): BackendProject { const { disconnected: _disconnected, ...retained } = record; return retained }

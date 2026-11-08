@@ -148,15 +148,39 @@ span.dsh-ssh-project-label { flex-direction: row; align-items: center; gap: 5px;
 .dsh-ssh__section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .dsh-ssh__count { display: inline-block; min-width: 21px; margin-left: 5px; padding: 0 6px; border-radius: 5px; background: var(--dsh-ssh-hover); color: var(--dsh-ssh-muted); text-align: center; font-size: 10px; }
 .dsh-ssh__filters { display: grid; grid-template-columns: minmax(0, 1fr) 145px; gap: 12px; margin-bottom: 22px; }
-.dsh-ssh__saved-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); align-items: start; gap: 16px; margin: 0; padding: 0; list-style: none; }
+.dsh-ssh__saved-list { display: grid; gap: 18px; margin: 0; padding: 0; list-style: none; }
 .dsh-ssh__connection { min-width: 0; padding: 20px; border: 1px solid var(--dsh-ssh-border); border-radius: 14px; background: var(--dsh-ssh-bg); }
 .dsh-ssh__connection:has(.dsh-ssh__credentials) { grid-column: 1 / -1; }
+.dsh-ssh__environment { min-width: 0; border: 1px solid var(--dsh-ssh-border); border-radius: 14px; background: var(--dsh-ssh-bg); }
+.dsh-ssh__environment-heading { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 16px; background: var(--dsh-ssh-soft); border-radius: 14px 14px 0 0; }
+.dsh-ssh__environment-heading:has([aria-expanded="false"]) { border-radius: 14px; }
+.dsh-ssh__environment-toggle { display: flex; align-items: center; flex: 1; gap: 10px; min-width: 0; padding: 0; text-align: left; border: 0; background: transparent; cursor: pointer; }
+.dsh-ssh__environment-toggle:focus-visible { outline: 2px solid var(--dsh-ssh-accent); outline-offset: 5px; border-radius: 4px; }
+.dsh-ssh__chevron { flex: none; width: 12px; color: var(--dsh-ssh-muted); }
+.dsh-ssh__environment-name { min-width: 0; flex: 1; }
+.dsh-ssh__environment-name strong { display: block; overflow-wrap: anywhere; font-size: 15px; font-weight: 650; }
+.dsh-ssh__environment-name > span { display: block; margin-top: 4px; color: var(--dsh-ssh-muted); font-size: 11px; overflow-wrap: anywhere; }
+.dsh-ssh__environment-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.dsh-ssh__backend, .dsh-ssh__projects { padding: 16px 18px; border-top: 1px solid var(--dsh-ssh-border); }
+.dsh-ssh__backend-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.dsh-ssh__backend-heading > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.dsh-ssh__backend-heading strong { font-size: 12px; }
+.dsh-ssh__backend-heading .dsh-ssh__registration { display: inline-flex; margin: 0 0 0 12px; }
+.dsh-ssh__environment-projects { margin: 12px 0 0 5px; padding: 0 0 0 15px; border-left: 2px solid var(--dsh-ssh-border); list-style: none; }
+.dsh-ssh__environment-projects .dsh-ssh__connection { padding: 14px 0; border: 0; border-radius: 0; background: transparent; }
+.dsh-ssh__environment-projects .dsh-ssh__connection + .dsh-ssh__connection { border-top: 1px solid var(--dsh-ssh-border); }
+.dsh-ssh__environment-projects .dsh-ssh__connection-heading > .dsh-ssh__connection-symbol { width: 24px; height: 24px; background: transparent; }
+.dsh-ssh__environment-projects .dsh-ssh__connection-heading strong { font-size: 14px; }
+.dsh-ssh__environment-note { margin: 4px 0 10px; color: var(--dsh-ssh-muted); font-size: 11px; line-height: 1.6; }
+.dsh-ssh__environment-note strong { font-weight: 600; color: light-dark(#856000, #e8be64); }
 .dsh-ssh__connection-symbol { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 9px; color: var(--dsh-ssh-muted); background: var(--dsh-ssh-soft); }
 .dsh-ssh__connection-symbol[data-connection-state="connected"] { color: var(--dsh-ssh-success); background: color-mix(in srgb, var(--dsh-ssh-success) 8%, transparent); }
 .dsh-ssh__connection-symbol[data-connection-state="error"] { color: var(--dsh-ssh-danger); }
 .dsh-ssh__connection-symbol[data-connection-state="connecting"] { color: light-dark(#a46c00, #e8be64); }
+.dsh-ssh__connection-symbol[data-connection-state="partial"] { color: light-dark(#a46c00, #e8be64); background: color-mix(in srgb, currentColor 7%, transparent); }
 .dsh-ssh__connection-heading { display: flex; align-items: center; gap: 8px; }
 .dsh-ssh__connection-heading strong { flex: 1; overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-ssh__project-user { margin-top: 5px !important; color: var(--dsh-ssh-muted); font-size: 11px; }
 .dsh-ssh__kind { flex: none; padding: 2px 5px; border: 1px solid var(--dsh-ssh-border); border-radius: 4px; color: var(--dsh-ssh-muted); font-size: 9px; font-weight: 650; letter-spacing: .04em; }
 .dsh-ssh__destination, .dsh-ssh__path { overflow: hidden; color: var(--dsh-ssh-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-ssh__destination { margin-top: 9px !important; }
@@ -211,6 +235,10 @@ span.dsh-ssh-project-label { flex-direction: row; align-items: center; gap: 5px;
   .dsh-ssh__body--add > .dsh-ssh__guide { margin: 0 24px 24px; }
 }
 @container dsh-remote (max-width: 540px) {
+  .dsh-ssh__environment-heading { flex-wrap: wrap; padding: 12px; }
+  .dsh-ssh__environment-toggle { flex-basis: 75%; }
+  .dsh-ssh__backend, .dsh-ssh__projects { padding: 12px; }
+  .dsh-ssh__environment-projects { margin-left: 0; padding-left: 10px; }
   .dsh-ssh__header, .dsh-ssh__saved, .dsh-ssh__new { padding: 18px 12px; }
   .dsh-ssh__guide--compact { grid-template-columns: 1fr; }
   .dsh-ssh__section-head { flex-wrap: wrap; }

@@ -68,3 +68,19 @@ test('invalid modes and unknown saved identities fail before any remote operatio
   await assert.rejects(f.connections.reconnect('missing'), /不存在/)
   assert.deepEqual(f.calls, [])
 })
+
+test('switching one project to existing full mode uses a non-resetting connection path', async () => {
+  const calls: string[] = []
+  const make = (id: string, path: string, mode: 'light' | 'full'): WorkspaceView => ({ id, workspaceId: id, title: id, target: { kind: 'wsl', distribution: 'Ubuntu', remotePath: path }, localPath: path, createdAt: 1, registered: true, mode })
+  const a = make('a-light', '/a', 'light')
+  const aFull = make('a-full', '/a', 'full')
+  const b = make('b-full', '/b', 'full')
+  const base = { add: async () => { throw Error('must reuse') }, disconnect: async () => { throw Error('must not disconnect') }, remove: async () => { throw Error('must not remove') }, reconnect: async () => { throw Error('must not reset the shared tunnel') } }
+  const full = { ...base, list: () => [aFull, b], connectProject: async (id: string) => { calls.push(id); return aFull } }
+  const connections = new WorkspaceConnections({ ...base, list: () => [a] }, full)
+  const result = await connections.reconnect(a.id, undefined, { mode: 'full' })
+  assert.equal(result.workspaceId, 'a-full')
+  assert.deepEqual(calls, ['a-full'])
+  assert.equal(b.workspaceId, 'b-full')
+  assert.equal(a.mode, 'light', 'original mode and its history remain available')
+})

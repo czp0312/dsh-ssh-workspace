@@ -17,7 +17,7 @@ npm pack
 从仓库根目录把本地包安装到测试 profile：
 
 ```sh
-dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.1.tgz
+dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.2.tgz
 ```
 
 测试前应通过独立 `DSH_HOME` 配置隔离数据目录，并启动同名 profile。不要直接修改正在使用的桌面 profile 来做安装试验。
@@ -30,6 +30,7 @@ dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.1.tgz
 | --- | --- |
 | `src/client.tsx`、`src/client.css` | 左侧入口、表单、目录浏览、已保存项目和连接设置 |
 | `src/workspace-badges.ts` | 原生工作区标题的远程图标和连接状态 |
+| `src/workspace-groups.ts` | 环境展示分组、真实后端连接分组、筛选影响范围和汇总状态 |
 | `src/manager.ts`、`src/transport.ts`、`src/tools.ts` | 轻量工作区、远程命令及本机工具边界 |
 | `src/backends.ts`、`src/backend-bootstrap.ts` | 全量后端安装、生命周期与隧道 |
 | `src/client-router.ts`、`src/backend-protocol.ts` | 原生客户端请求分流和后端 ID 转换 |
@@ -49,6 +50,10 @@ dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.1.tgz
 - 订阅可以在自然断线后重试；提示词和工具调用不能自动重放。
 - 手动断开持久化，不能被轮询或订阅重试绕过。
 - 模式切换创建或复用另一模式入口，保留原入口、原历史和旧会话路由。
+- 环境仅是展示分组，每个项目独立选择模式。`environmentKey` 不决定隧道所有权；共享全量控制仅按持久化 `backendId` 分组，缺失身份的旧记录不能合并。SSH 省略端口可能来自配置，不能擅自当成 22。
+- 搜索筛选只改变可见目录，连接操作仍针对该实际后端的完整项目集合，并显示隐藏的影响范围。轻量连接始终是项目级。
+- `connectProject` 为跨模式进入已有全量项目复用健康连接，只有显式「重新连接」才重建通道。单个项目的模式切换进度不能标成整组重连。
+- 共享连接从远端根目录启动，不依赖第一个项目目录仍存在；后端健康与目录登记状态分别报告，失效目录不能阻止其他项目恢复，也不能被自动重新登记。
 - 路由仅依赖 `connection`，必须先于原生控制器订阅安装；界面、导航和上传钩子分别等待所需服务，不能让 UI 依赖推迟整个路由启动。
 - 客户端模块清单、插件管理和访问控制始终使用本机宿主；不能随着当前远程项目切换这些服务。初次读取项目目录也不应打断原生会话恢复。
 - 每个合并的 Session 控制流只发送一份初始快照，再发送增量。目录登记或后端来源变化时，以可重试的传输错误结束旧订阅，重新建立快照，不重放业务请求。
@@ -97,6 +102,8 @@ npx tsx scripts/smoke-backend.ts
 ```
 
 `npm run check` 覆盖实际发布脚本加载与交互、模式分流、本机 / 远端请求隔离、命名空间、审批事件回传、终端上行、二进制响应、原子存储和轻量命令传输。
+
+环境分组回归还覆盖同环境混合模式、多后端身份、筛选后的完整断开范围、连接取消、失效目录，以及单项目模式切换不重置健康共享连接。实机验证使用同一 WSL 中的两个全量目录和一个轻量入口，检查共享断开、恢复和模式往返时的状态与原生侧栏。
 
 `smoke-backend.ts` 面向已准备好的 `Ubuntu-22.04` 及专用测试目录，验证真实远端 DSH 的会话创建、工作区流、终端、文件、附件上传、事件握手，以及全量 → 轻量 → 全量、断开 / 重连与原会话保留。脚本会启动或复用远端后端，但不主动发起付费模型请求。运行前阅读脚本并确认发行版及测试路径适合当前环境。
 

@@ -119,6 +119,98 @@ const select = async (suffix, value) => {
   await act(async () => { element.value = value; element.dispatchEvent(new window.Event('change', { bubbles: true })) })
 }
 
+const groupedRow = (id, changes = {}) => ({ id, workspaceId: `native-${id}`, title: id, mode: 'full', backendId: 'shared', registered: true, connectionState: 'connected', backendHealth: { connectionState: 'connected' }, target: { kind: 'wsl', distribution: 'DemoLinux', remotePath: `/srv/${id}` }, ...changes })
+
+test('one environment lists mixed modes together and switching one project never marks siblings as reconnecting', async () => {
+  const rows = [groupedRow('api'), groupedRow('worker'), groupedRow('tools', { mode: 'light', backendId: undefined })]
+  const before = structuredClone(rows)
+  let finish
+  const fixture = await mount({ initialSaved: rows, respond(method) {
+    if (method === 'reconnect') return new Promise(resolve => { finish = resolve })
+  } })
+  try {
+    await click(button('远程工作区'))
+    const list = document.querySelector('.dsh-ssh__projects')
+    assert.equal(list.querySelectorAll('.dsh-ssh__connection').length, 3)
+    assert.deepEqual([...list.querySelectorAll('[data-mode]')].map(item => item.dataset.mode), ['full', 'full', 'light'])
+    assert.equal(document.querySelector('.dsh-ssh__backend').querySelector('.dsh-ssh__connection'), null, 'connection controls do not own the project list')
+    assert.equal(list.querySelectorAll('button[aria-label$=的连接模式]').length, 3)
+    await click(button('设置 api 的连接模式'))
+    assert.match(document.querySelector('.dsh-ssh__credentials').textContent, /仅为「api」选择模式.*其他项目保持原模式/)
+    await select('mode', 'light')
+    await act(async () => document.querySelector('.dsh-ssh__credentials').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'reconnect').input, { id: 'api', mode: 'light' })
+    assert.equal(document.querySelector('.dsh-ssh__backend').getAttribute('aria-busy'), 'false')
+    assert.equal(document.querySelector('[data-project-id=worker]').dataset.connectionState, 'connected')
+    assert.equal(document.querySelector('[data-project-id=tools]').dataset.connectionState, 'connected')
+    assert.equal(button('断开 DemoLinux 的全量连接').textContent, '断开连接', 'a mode switch is not a cancellable shared reconnect')
+    assert.equal(button('断开 DemoLinux 的全量连接').disabled, true)
+    assert.deepEqual(rows, before)
+    await act(async () => finish({ ok: true, value: { ...rows[0], id: 'api-light', workspaceId: 'native-api-light', mode: 'light', backendId: undefined } }))
+    assert.equal(fixture.calls.some(call => ['connection/reconnect', 'disconnect', 'remove'].includes(call.method)), false)
+    assert.equal(document.querySelector('[data-project-id=worker] [data-mode]').dataset.mode, 'full')
+    assert.deepEqual(rows, before, 'mode switching leaves every existing identity and history intact')
+  } finally { await fixture.dispose() }
+})
+
+test('shared actions affect the complete group even with filtered projects', async () => {
+  const rows = [groupedRow('api'), groupedRow('worker'), groupedRow('other', { backendId: 'root' }), groupedRow('light', { mode: 'light', backendId: undefined })]
+  const fixture = await mount({ initialSaved: rows, respond(method) {
+    if (method === 'disconnect') { rows.filter(row => row.backendId === 'shared').forEach(row => Object.assign(row, { disconnected: true, connectionState: 'disconnected', backendHealth: { connectionState: 'disconnected' } })); return { ok: true, value: null } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    assert.equal(document.querySelectorAll('.dsh-ssh__environment').length, 1)
+    assert.equal(document.querySelectorAll('.dsh-ssh__backend').length, 2)
+    assert.equal(document.querySelectorAll('.dsh-ssh__connection [aria-label^=断开]').length, 1)
+    const field = document.querySelector('input[type=search]')
+    await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(field, 'worker'); field.dispatchEvent(new window.Event('input', { bubbles: true })) })
+    assert.equal(document.querySelectorAll('.dsh-ssh__connection').length, 1)
+    assert.match(document.querySelector('.dsh-ssh__environment-note').textContent, /隐藏了 1 个受影响项目/)
+    await click(button('断开连接'))
+    assert.deepEqual(fixture.calls.filter(call => call.method === 'disconnect').map(call => call.input), [{ id: 'api' }])
+    assert.equal(rows[2].connectionState, 'connected')
+    assert.equal(rows[3].connectionState, 'connected')
+    assert.match(document.querySelector('.dsh-ssh__notice').textContent, /2 个项目离线/)
+    assert.match(document.querySelector('.dsh-ssh__environment-name').textContent, /部分连接/)
+    assert.equal(rows[1].workspaceId, 'native-worker')
+  } finally { await fixture.dispose() }
+})
+
+test('pending shared reconnect reaches every child and can be cancelled once', async () => {
+  const rows = [groupedRow('api', { disconnected: true }), groupedRow('worker', { disconnected: true })]
+  const fixture = await mount({ initialSaved: rows, respond(method, payload, signal) {
+    if (method === 'connection/reconnect') return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+    if (method === 'disconnect') return { ok: true, value: null }
+  } })
+  try {
+    await click(button('远程工作区')); await click(button('连接 DemoLinux 的全量连接'))
+    assert.equal(fixture.calls.filter(call => call.method === 'connection/reconnect').length, 1)
+    assert.ok([...document.querySelectorAll('.dsh-ssh__connection')].every(item => item.dataset.connectionState === 'connecting'))
+    await click(button('取消连接'))
+    assert.equal(fixture.calls.find(call => call.method === 'connection/reconnect').signal.aborted, true)
+    assert.equal(fixture.calls.filter(call => call.method === 'disconnect').length, 1)
+    assert.ok([...document.querySelectorAll('.dsh-ssh__connection')].every(item => item.dataset.connectionState === 'disconnected'))
+  } finally { await fixture.dispose() }
+})
+
+test('missing registration keeps backend controls and connection auth cannot switch modes', async () => {
+  const rows = [groupedRow('missing', { registered: false, connectionState: 'error', target: { kind: 'ssh', host: 'demo', auth: 'password', remotePath: '/gone' } }), groupedRow('api', { target: { kind: 'ssh', host: 'demo', auth: 'password', remotePath: '/srv/api' } })]
+  const fixture = await mount({ initialSaved: rows, respond(method) { if (method === 'connection/reconnect') return { ok: true, value: null } } })
+  try {
+    await click(button('远程工作区'))
+    assert.equal(button('断开连接').disabled, false)
+    assert.equal(button('重新添加 missing 的目录').disabled, false)
+    await click(button('连接认证'))
+    assert.equal(document.querySelector('select[id$="-mode"]'), null)
+    assert.match(document.querySelector('.dsh-ssh__credentials').textContent, /不修改项目模式/)
+    await act(async () => document.querySelector('.dsh-ssh__credentials').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'connection/reconnect').input, { id: 'missing', force: true })
+    assert.equal(fixture.calls.some(call => call.method === 'reconnect'), false)
+    assert.equal(rows[0].registered, false)
+  } finally { await fixture.dispose() }
+})
+
 test('published classic script registers a native sidebar panel outside the account menu', async () => {
   const fixture = await mount()
   try {
@@ -231,7 +323,7 @@ test('SSH explicit key paths are used by connection tests, directory browsing an
     await click(button('浏览目录'))
     await click(button('添加到工作区'))
     for (const method of ['test', 'browse', 'add']) assert.equal(fixture.calls.find(call => call.method === method).input.target.identityFile, 'C:\\Keys with spaces\\dev.pem')
-    await click(button('设置 project 的连接模式'))
+    await click(button('连接认证'))
     assert.match(document.querySelector('.dsh-ssh__credentials').textContent, /密钥.*C:\\Keys with spaces\\dev.pem/)
   } finally { await fixture.dispose() }
 })
@@ -513,7 +605,7 @@ test('saved projects open on the dashboard and a second directory reuses the sel
     await click(button('远程工作区'))
     assert.equal(document.querySelector('.dsh-ssh__new'), null)
     assert.match(document.querySelector('.dsh-ssh__saved').textContent, /1 个已连接/)
-    await click(button('添加同设备项目'))
+    await click(button('向 demo-host:2222 添加项目'))
     assert.equal(document.querySelector('input[id$="-host"]').value, 'demo-host')
     assert.equal(document.querySelector('input[id$="-port"]').value, '2222')
     assert.equal(document.querySelector('input[id$="-identityFile"]').value, '~/.ssh/demo')
@@ -538,7 +630,7 @@ test('failed native navigation reports the failure and keeps connection actions 
     await click(button('在当前窗口打开 API'))
     assert.match(document.querySelector('[role="alert"]').textContent, /无法打开项目.*stream unavailable/)
     assert.ok(document.querySelector('.dsh-ssh__saved'))
-    assert.equal(button('断开 API').disabled, false)
+    assert.equal(button('断开 Ubuntu 的全量连接').disabled, false)
     assert.deepEqual(fixture.opened, [])
   } finally { await fixture.dispose() }
 })

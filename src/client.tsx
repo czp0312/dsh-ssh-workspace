@@ -4,6 +4,7 @@ import { installBackendRouter } from './client-router.js'
 import { installWorkspaceBadges } from './workspace-badges.js'
 import { connectionState, CONNECTION_LABELS } from './connection-status.js'
 import { PLUGIN_VERSION, RPC_CHANNEL, RPC_PREFIX, sshTarget, targetLabel, type DockerHost, type DockerContainer, type AddWorkspaceRequest, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type ReconnectRequest, type SavedWorkspace, type WorkspaceView, type WorkspaceMode, type SshCredentials } from './types.js'
+import { aggregateState, backendState, connectionLabel, environmentLabel, environmentDetail, groupWorkspaces, type ConnectionGroup, type EnvironmentGroup } from './workspace-groups.js'
 import type { SkillSyncPreview, SkillSyncResult } from './skills-types.js'
 
 type Disposer = () => void
@@ -28,6 +29,7 @@ interface Endpoints {
   test: { input: { target: RemoteTarget; credentials?: SshCredentials }; output: RemoteInfo }
   add: { input: AddWorkspaceRequest; output: SavedWorkspace }
   reconnect: { input: ReconnectRequest; output: SavedWorkspace }
+  'connection/reconnect': { input: { id: string; force?: boolean; credentials?: SshCredentials }; output: void }
   disconnect: { input: { id: string }; output: void }
   remove: { input: { id: string }; output: void }
 }
@@ -89,11 +91,11 @@ interface Snapshot {
   errors: Record<Area, string | null>
   notice: string | null
   confirmRemove: string | null
-  reauth: { id: string; mode: WorkspaceMode; localPath: string; password: string; passphrase: string } | null
+  reauth: { id: string; mode: WorkspaceMode; localPath: string; password: string; passphrase: string; connection?: boolean; force?: boolean } | null
 }
 
 const emptyDraft = (): Draft => ({ mode: 'full', title: '', host: '', port: '', user: '', sshAuth: 'auto', identityFile: '', certificateFile: '', password: '', passphrase: '', distribution: '', dockerLocation: 'local', context: '', container: '', dockerUser: '', remotePath: '/', localPath: '' })
-const mutationPending = (state: Snapshot): boolean => state.pending.some(key => key === 'add' || key === 'skills/apply' || /^(open|reconnect|disconnect|remove):/.test(key))
+const mutationPending = (state: Snapshot): boolean => state.pending.some(key => key === 'add' || key === 'skills/apply' || /^(open|switch|reconnect|disconnect|remove):/.test(key))
 const errorText = (error: unknown): string => error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '操作未完成，请重试。'
 const joinRemote = (path: string, name: string): string => name.startsWith('/') ? name : `${path.replace(/\/+$/, '')}/${name}`
 const parentRemote = (path: string): string => path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'
@@ -207,9 +209,9 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     if (state.status) onStatus(state.status)
     refresh()
   }
-  const editConnection = (id: string | null): void => {
+  const editConnection = (id: string | null, connection = false, force = false): void => {
     const record = state.status?.workspaces.find(row => row.id === id)
-    update({ reauth: record ? { id: record.id, mode: record.mode ?? 'light', localPath: record.mode === 'full' ? '' : record.localPath, password: '', passphrase: '' } : null })
+    update({ reauth: record ? { id: record.id, mode: record.mode ?? 'light', localPath: record.mode === 'full' ? '' : record.localPath, password: '', passphrase: '', connection, force } : null })
   }
   const loadSkills = (id: string, result: SkillSyncResult | null = null): void => {
     if (mutationPending(state) && !state.pending.includes('skills/apply')) return
@@ -363,6 +365,15 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     },
     editCredentials: editConnection,
     editConnection,
+    reconnectBackend: (id: string, force = false): void => {
+      if (mutationPending(state)) return
+      cancel('status'); cancelForm()
+      update({ notice: null, reauth: null, confirmRemove: null })
+      void request(`reconnect:${id}`, 'connection/reconnect', { id, ...(force ? { force } : {}) }, 'connections', () => {
+        onChanged(); refresh()
+        update({ notice: '全量后端已连接，共享此连接的项目已刷新；未登记目录需单独恢复。' })
+      }, message => { refresh(); if (/SSH 密码|口令|认证失败|Permission denied/i.test(message)) editConnection(id, true, force) })
+    },
     changeCredential: (field: 'password' | 'passphrase', value: string): void => { if (state.reauth && !mutationPending(state)) update({ reauth: { ...state.reauth, [field]: value } }) },
     changeConnection: (field: 'mode' | 'localPath', value: string): void => {
       if (!state.reauth || mutationPending(state) || (field === 'mode' && value !== 'light' && value !== 'full')) return
@@ -374,25 +385,33 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
       const original = state.status?.workspaces.find(row => row.id === form.id)
       if (!original) return
       const switching = form.mode !== (original.mode ?? 'light')
+      if (!form.connection && original.mode === 'full' && !switching) return
       const credentials = { ...(form.password ? { password: form.password } : {}), ...(form.passphrase ? { passphrase: form.passphrase } : {}) }
-      void request(`reconnect:${form.id}`, 'reconnect', { id: form.id, ...(Object.keys(credentials).length ? { credentials } : {}), ...(switching ? { mode: form.mode, ...(form.mode === 'light' && form.localPath.trim() ? { localPath: form.localPath.trim() } : {}) } : {}) }, 'connections', saved => {
+      if (form.connection) {
+        void request(`reconnect:${form.id}`, 'connection/reconnect', { id: form.id, ...(form.force ? { force: true } : {}), ...(Object.keys(credentials).length ? { credentials } : {}) }, 'connections', () => {
+          onChanged(); refresh(); update({ reauth: null, notice: '全量后端已连接，共享此连接的项目已刷新。' })
+        }, () => refresh())
+        return
+      }
+      void request(`${switching ? 'switch' : 'reconnect'}:${form.id}`, 'reconnect', { id: form.id, ...(Object.keys(credentials).length ? { credentials } : {}), ...(switching ? { mode: form.mode, ...(form.mode === 'light' && form.localPath.trim() ? { localPath: form.localPath.trim() } : {}) } : {}) }, 'connections', saved => {
         remember(saved); update({ reauth: null, notice: switching ? `已连接${form.mode === 'full' ? '全量' : '轻量'}模式。原模式入口与会话历史保留，可分别继续使用。` : `「${saved.title}」已重新连接。` })
       }, () => refresh())
     },
     disconnect: (id: string): void => {
-      if (state.pending.some(key => key !== `reconnect:${id}` && (key === 'add' || /^(reconnect|disconnect|remove):/.test(key)))) return
-      cancel(`reconnect:${id}`)
-      cancel('status')
       const record = state.status?.workspaces.find(row => row.id === id)
+      const affected = state.status?.workspaces.filter(row => row.id === id || (record?.backendId && row.backendId === record.backendId && row.mode === 'full')) ?? []
+      const reconnects = affected.map(row => `reconnect:${row.id}`)
+      if (state.pending.some(key => !reconnects.includes(key) && (key === 'add' || key === 'skills/apply' || /^(open|switch|reconnect|disconnect|remove):/.test(key)))) return
+      reconnects.forEach(cancel)
+      cancel('status')
       void request(`disconnect:${id}`, 'disconnect', { id }, 'connections', () => {
         if (state.status) {
-          const backendId = (record as (WorkspaceView & { backendId?: string }) | undefined)?.backendId
-          update({ status: { ...state.status, workspaces: state.status.workspaces.map(row => row.id === id || (backendId && (row as WorkspaceView & { backendId?: string }).backendId === backendId) ? { ...row, disconnected: true, connectionState: 'disconnected', online: false, connectionError: undefined } : row) }, reauth: null,
-            notice: record?.mode === 'full' ? '已断开本机隧道，远端 DSH 和任务继续运行；文件与会话历史保留。' : '已断开插件命令通道，文件与会话历史保留；外部 SSHFS / WSL 挂载不卸载。' })
+          update({ status: { ...state.status, workspaces: state.status.workspaces.map(row => affected.some(item => item.id === row.id) ? { ...row, disconnected: true, connectionState: 'disconnected', online: false, connectionError: undefined, ...(row.backendId ? { backendHealth: { connectionState: 'disconnected' as const } } : {}) } : row) }, reauth: null,
+            notice: record?.mode === 'full' ? `已断开共享全量连接，${affected.length} 个项目离线。远端 DSH 和任务继续运行；轻量项目不受影响。` : '已断开插件命令通道，文件与会话历史保留；外部 SSHFS / WSL 挂载不卸载。' })
           onStatus(state.status!)
         }
         onChanged(); refresh()
-      })
+      }, () => refresh())
     },
     confirmRemove: (id: string | null): void => update({ confirmRemove: id }),
     remove: (id: string): void => {
@@ -452,16 +471,147 @@ function ErrorNotice({ message }: { message: string | null }) {
   return message ? <p className="dsh-ssh__error" role="alert">{message}</p> : null
 }
 
+function ProjectRow({ manager, state, item, connection, connectionIndex }: Injected & { state: Snapshot; item: WorkspaceView; connection?: ConnectionGroup; connectionIndex?: number }) {
+  const busy = mutationPending(state)
+  const rows = connection?.rows ?? [item]
+  const connecting = rows.some(row => state.pending.includes(`reconnect:${row.id}`))
+  const disconnecting = rows.some(row => state.pending.includes(`disconnect:${row.id}`))
+  const opening = state.pending.includes(`open:${item.id}`)
+  const managedByGroup = !!connection
+  const status = connecting ? 'connecting' : disconnecting ? 'disconnected' : connectionState(item)
+  return <li className="dsh-ssh__connection" data-connection-state={status} data-project-id={item.id} aria-busy={connecting || disconnecting || state.pending.includes(`switch:${item.id}`) || state.pending.includes(`remove:${item.id}`)}>
+                <div className="dsh-ssh__connection-heading"><span className="dsh-ssh__connection-symbol" data-connection-state={status}><ConnectionIcon /></span><strong title={item.title}>{item.title}</strong><span className="dsh-ssh__kind" data-mode={item.mode ?? 'light'}>{item.mode === 'full' ? '全量' : '轻量'}</span></div>
+                {item.target.kind === 'ssh' && item.target.user && <p className="dsh-ssh__project-user">用户 · {item.target.user}</p>}
+                {item.target.kind === 'wsl' && item.target.user && <p className="dsh-ssh__project-user">用户 · {item.target.user}</p>}
+                {item.target.kind === 'docker' && item.target.user && <p className="dsh-ssh__project-user">容器用户 · {item.target.user}</p>}
+                <p className="dsh-ssh__path" title={item.target.remotePath}>{item.target.remotePath}</p>
+                <span className="dsh-ssh__registration" data-connection-state={status} role="status">{disconnecting ? '正在断开' : CONNECTION_LABELS[status]} · {item.mode === 'full' ? '远程 DSH 后端' : '本机 Agent / 远程命令'}</span>
+                {connectionIndex !== undefined && <p className="dsh-ssh__hint">使用共享连接 {connectionIndex + 1} · {connectionLabel(item)}</p>}
+                {!item.registered && <p className="dsh-ssh__hint">{item.mode === 'full' ? '远端登记已变化。重新添加会恢复目录入口，旧会话保留在远端，不自动关联到新入口。' : '尚未登记，连接后恢复侧栏入口。'}</p>}
+                {status === 'error' && <p className="dsh-ssh__connection-error">{item.connectionError || '连接不可用，请重新连接。'}</p>}
+                {state.confirmRemove === item.id ? <div className="dsh-ssh__remove-confirm">
+                  <p>移除此模式的工作区登记？文件和会话历史保留。需要暂停连接时请使用“断开”。</p>
+                  <div className="dsh-ssh__actions">
+                    <button type="button" className="dsh-ssh__button dsh-ssh__button--danger" onClick={() => manager.remove(item.id)} disabled={busy}>{state.pending.includes(`remove:${item.id}`) ? '移除中…' : '确认移除'}</button>
+                    <button type="button" className="dsh-ssh__button" onClick={() => manager.confirmRemove(null)} disabled={busy}>取消</button>
+                  </div>
+                </div> : <div className="dsh-ssh__connection-actions">
+                  {status === 'connected' && manager.canOpen() && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || !item.registered} title="打开此模式的会话输入页；继续旧对话请从侧栏选择" onClick={() => { void manager.openWorkspace(item.workspaceId) }} aria-label={`在当前窗口打开 ${item.title}`}>{opening ? '打开中…' : '打开项目'}</button>}
+                  {item.mode === 'full' && !item.registered ? <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.newProject(item.id, true)} aria-label={`重新添加 ${item.title} 的目录`}>重新添加目录</button> : !managedByGroup && status !== 'connected' && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`连接 ${item.title}`}>{connecting ? '连接中…' : '连接'}</button>}
+                  {!managedByGroup && (status === 'connected' || status === 'connecting') && <button type="button" className="dsh-ssh__text-button" disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(item.id)} aria-label={`断开 ${item.title}`}>断开</button>}
+                  <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.editConnection(item.id)} aria-label={`设置 ${item.title} 的连接模式`}>项目模式</button>
+                  {item.mode === 'full' && <button type="button" className="dsh-ssh__text-button" disabled={busy || status !== 'connected'} onClick={() => manager.loadSkills(item.id)} aria-label={`同步本机 Skill 到 ${item.title}`}>同步 Skill</button>}
+                  <details className="dsh-ssh__more"><summary aria-label={`${item.title} 的更多操作`}>更多</summary><div className="dsh-ssh__more-actions">
+                    {!managedByGroup && status === 'connected' && <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`重新连接 ${item.title}`}>重新连接</button>}
+                    <button type="button" className="dsh-ssh__text-button dsh-ssh__remove" disabled={busy} onClick={() => manager.confirmRemove(item.id)} aria-label={`移除 ${item.title} 的登记`}>移除登记</button>
+                  </div></details>
+                </div>}
+                <ConnectionSettings manager={manager} state={state} item={item} />
+              </li>
+}
+
+function ConnectionSettings({ manager, state, item, connection = false }: Injected & { state: Snapshot; item: WorkspaceView; connection?: boolean }) {
+  const form = state.reauth?.id === item.id && !!state.reauth.connection === connection ? state.reauth : null
+  if (!form) return null
+  const busy = mutationPending(state)
+  const connecting = state.pending.includes(`reconnect:${item.id}`) || state.pending.includes(`switch:${item.id}`)
+  const switching = form.mode !== (item.mode ?? 'light')
+  const ssh = sshTarget(item.target)
+  return <form className="dsh-ssh__credentials" aria-label={form.connection ? `${item.title} 的连接认证` : `${item.title} 的连接设置`} onSubmit={event => { event.preventDefault(); manager.reconnectWithCredentials() }}>
+                  {form.connection ? <p className="dsh-ssh__hint">此认证用于共享的全量后端连接，影响该连接下的所有项目，不修改项目模式。</p> : <>
+                  <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mode`}>此项目的运行模式<select id={`saved-${item.id}-mode`} value={form.mode} onChange={event => manager.changeConnection('mode', event.target.value)} disabled={busy}><option value="light">轻量模式</option><option value="full">全量模式</option></select></label>
+                  <div className="dsh-ssh__scope"><strong>{form.mode === 'full' ? '执行与配置：远端 DSH' : 'Agent 与模型：本机 DSH'}</strong><p>{form.mode === 'full' ? '文件、终端、任务和模型请求都由远端处理。Skill 可选择同步，模型与 MCP 使用远端配置。' : '沿用本机模型和 Skill；文件通过共享目录访问，Bash 在远端执行。适合已有环境与低配置主机。'}</p></div>
+                  <p className="dsh-ssh__hint">仅为「{item.title}」选择模式，同一环境中的其他项目保持原模式。两种模式使用同一远程目录，分别保留会话历史；切换不会迁移旧会话或停止原模式，可从各自入口继续。</p>
+                  {switching && form.mode === 'full' && <p className="dsh-ssh__hint">首次使用全量模式将安装匹配的远端 DSH，模型配置使用远端环境。</p>}
+                  {switching && form.mode === 'light' && item.target.kind !== 'wsl' && <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mount`}>{item.target.kind === 'docker' ? '本机共享/挂载路径' : '本机 SSHFS 挂载路径'}<input id={`saved-${item.id}-mount`} value={form.localPath} onChange={event => manager.changeConnection('localPath', event.target.value)} disabled={busy} placeholder="已有轻量项目可留空复用，否则填写已建立的挂载路径" /></label>}
+                  </>}
+                  {ssh && (form.connection || switching || item.mode !== 'full') && <>
+                    <p className="dsh-ssh__hint">登录方式：{ssh.auth === 'password' ? '仅密码' : ssh.auth === 'certificate' ? '证书' : ssh.auth === 'key' ? '密钥' : '自动选择'}{ssh.identityFile ? ` · ${ssh.identityFile}` : ''}{ssh.certificateFile ? ` · ${ssh.certificateFile}` : ''}</p>
+                    <p className="dsh-ssh__hint">密码和私钥口令仅本次运行保留；留空沿用已提供的凭据。</p>
+                    {(!ssh.auth || ssh.auth === 'auto' || ssh.auth === 'password') && <label className="dsh-ssh__field">SSH 密码<input type="password" autoComplete="off" value={form.password} onChange={event => manager.changeCredential('password', event.target.value)} disabled={busy} /></label>}
+                    {ssh.auth !== 'password' && <label className="dsh-ssh__field">私钥口令<input type="password" autoComplete="off" value={form.passphrase} onChange={event => manager.changeCredential('passphrase', event.target.value)} disabled={busy} placeholder="未加密私钥可留空" /></label>}
+                  </>}
+                  {!form.connection && item.mode === 'full' && !switching && <p className="dsh-ssh__hint">当前已使用全量模式。连接、断开和认证请在上方的全量连接中操作。</p>}
+                  <div className="dsh-ssh__actions"><button className="dsh-ssh__button" type="submit" disabled={busy || (!form.connection && item.mode === 'full' && !switching)}>{connecting ? '连接中…' : form.connection ? (form.force ? '重新连接全量后端' : '连接全量后端') : switching ? `以${form.mode === 'full' ? '全量' : '轻量'}模式连接` : '连接此模式'}</button><button className="dsh-ssh__text-button" type="button" onClick={() => manager.editCredentials(null)} disabled={busy}>取消</button></div>
+                </form>
+}
+
+function connectionPending(state: Snapshot, group: ConnectionGroup, action: string): boolean {
+  return group.rows.some(row => state.pending.includes(`${action}:${row.id}`))
+}
+
+function FullConnection({ manager, state, group, label }: Injected & { state: Snapshot; group: ConnectionGroup; label: string }) {
+  const row = group.rows[0]!
+  const busy = mutationPending(state)
+  const connecting = connectionPending(state, group, 'reconnect')
+  const disconnecting = connectionPending(state, group, 'disconnect')
+  const status = connecting ? 'connecting' : backendState(group.rows)
+  const active = status === 'connected' || status === 'connecting'
+  const hidden = group.rows.length - group.visible.length
+  const authRow = group.rows.find(item => item.id === state.reauth?.id)
+  const error = group.rows.find(item => item.backendHealth?.connectionError)?.backendHealth?.connectionError
+  return <section className='dsh-ssh__backend' data-backend-key={group.key} aria-label={`${label} 的全量连接`} aria-busy={connecting || disconnecting}>
+    <div className='dsh-ssh__backend-heading'>
+      <div><strong>共享全量后端</strong><span className='dsh-ssh__registration' data-connection-state={status} role='status'>{disconnecting ? '正在断开' : CONNECTION_LABELS[status]}</span><p className='dsh-ssh__hint'>{label} · {connectionLabel(row)}</p></div>
+      <div className='dsh-ssh__environment-actions'>
+        {active ? <button type='button' className='dsh-ssh__button' disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(row.id)} aria-label={`断开 ${label} 的全量连接`}>{disconnecting ? '正在断开…' : connecting ? '取消连接' : '断开连接'}</button> : <button type='button' className='dsh-ssh__button dsh-ssh__button--primary' disabled={busy} onClick={() => manager.reconnectBackend(row.id)} aria-label={`连接 ${label} 的全量连接`}>连接</button>}
+        <details className='dsh-ssh__more'><summary aria-label={`${label} 的连接操作`}>更多</summary><div className='dsh-ssh__more-actions'>
+          <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.reconnectBackend(row.id, true)}>重新连接</button>
+          {sshTarget(row.target) && <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.editConnection(row.id, true, active)}>连接认证</button>}
+          <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.newProject(row.id)}>使用此连接添加项目</button>
+        </div></details>
+      </div>
+    </div>
+    <p className='dsh-ssh__environment-note'>影响 {group.rows.length} 个全量项目：{group.rows.map(item => item.title).join('、')}。断开或重连只影响这些项目，轻量项目不受影响，远端任务继续运行。{hidden > 0 && <strong> 当前筛选隐藏了 {hidden} 个受影响项目。</strong>}</p>
+    <ErrorNotice message={error ?? null} />
+    {authRow && <ConnectionSettings manager={manager} state={state} item={authRow} connection />}
+  </section>
+}
+
+function Environment({ manager, state, group }: Injected & { state: Snapshot; group: EnvironmentGroup }) {
+  const [expanded, setExpanded] = useState(true)
+  const id = useId()
+  const busy = mutationPending(state)
+  const label = environmentLabel(group.target)
+  const status = aggregateState(group.rows.map(row => {
+    const connection = group.connections.find(item => item.rows.includes(row))
+    if (connection && connectionPending(state, connection, 'reconnect')) return 'connecting'
+    if (!connection && state.pending.includes(`reconnect:${row.id}`)) return 'connecting'
+    return connectionState(row)
+  }))
+  return <li className='dsh-ssh__environment' data-environment-key={group.key}>
+    <header className='dsh-ssh__environment-heading'>
+      <button type='button' className='dsh-ssh__environment-toggle' aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)} aria-label={`${expanded ? '收起' : '展开'} ${label} 的项目`}>
+        <span className='dsh-ssh__chevron' aria-hidden='true'>{expanded ? '⌄' : '›'}</span><span className='dsh-ssh__connection-symbol' data-connection-state={status}><ConnectionIcon /></span>
+        <span className='dsh-ssh__environment-name'><strong>{label}</strong><span>{environmentDetail(group.target)} · {status === 'partial' ? '部分连接' : CONNECTION_LABELS[status]} · {group.rows.length} 个项目{group.rows.length !== group.visible.length ? `（显示 ${group.visible.length} 个）` : ''}</span></span>
+      </button>
+      <button type='button' className='dsh-ssh__text-button' disabled={busy} onClick={() => manager.newProject(group.visible[0]!.id)} aria-label={`向 ${label} 添加项目`}>＋ 添加项目</button>
+    </header>
+    <div id={id} hidden={!expanded}>
+      {group.connections.map((connection, index) => connection.visible.length > 0 && <FullConnection key={connection.key} manager={manager} state={state} group={connection} label={group.connections.length > 1 ? `${label} · ${connectionLabel(connection.rows[0]!)} · 连接 ${index + 1}` : label} />)}
+      <section className='dsh-ssh__projects' aria-label={`${label} 的项目目录`}>
+        <div className='dsh-ssh__backend-heading'><div><strong>项目目录</strong><p className='dsh-ssh__hint'>每个项目单独选择轻量或全量模式；轻量连接独立控制。</p></div></div>
+        <ul className='dsh-ssh__environment-projects'>{group.visible.map(item => {
+          const index = group.connections.findIndex(connection => connection.rows.includes(item))
+          return <ProjectRow key={item.id} manager={manager} state={state} item={item} connection={group.connections[index]} connectionIndex={index >= 0 && group.connections.length > 1 ? index : undefined} />
+        })}</ul>
+      </section>
+    </div>
+  </li>
+}
+
 function SavedConnections({ manager, state }: Injected & { state: Snapshot }) {
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all')
   const busy = mutationPending(state)
   const workspaces = state.status?.workspaces ?? []
   const online = workspaces.filter(row => connectionState(row) === 'connected').length
-  const visible = workspaces.filter(row => {
+  const matches = (row: WorkspaceView) => {
     const matches = `${row.title} ${describeTarget(row.target)} ${row.target.remotePath}`.toLowerCase().includes(search.trim().toLowerCase())
     return matches && (filter === 'all' || filter === row.mode || filter === row.target.kind || (filter === 'offline' && connectionState(row) !== 'connected'))
-  })
+  }
+  const groups = groupWorkspaces(workspaces, matches)
+  const visible = groups.flatMap(group => group.visible)
   return <section className="dsh-ssh__saved" aria-labelledby="dsh-ssh-saved-heading">
     <div className="dsh-ssh__section-head">
       <div><h3 id="dsh-ssh-saved-heading">我的远程项目 <span className="dsh-ssh__count">{workspaces.length}</span></h3><p className="dsh-ssh__hint">{online} 个已连接 · 继续已有对话可直接从左侧项目展开。</p></div>
@@ -481,55 +631,7 @@ function SavedConnections({ manager, state }: Injected & { state: Snapshot }) {
     </div>}
     {!!workspaces.length && !visible.length && <p className="dsh-ssh__empty">没有符合条件的项目。请调整搜索或筛选。</p>}
     <ul className="dsh-ssh__saved-list">
-      {visible.map(item => {
-        const ssh = sshTarget(item.target)
-        const connecting = state.pending.includes(`reconnect:${item.id}`)
-        const opening = state.pending.includes(`open:${item.id}`)
-        const disconnecting = state.pending.includes(`disconnect:${item.id}`)
-        const status = connecting ? 'connecting' : disconnecting ? 'disconnected' : connectionState(item)
-        const form = state.reauth?.id === item.id ? state.reauth : null
-        const switching = form && form.mode !== (item.mode ?? 'light')
-        return <li key={item.id} className="dsh-ssh__connection" data-connection-state={status} aria-busy={connecting || disconnecting || state.pending.includes(`remove:${item.id}`)}>
-        <div className="dsh-ssh__connection-heading"><span className="dsh-ssh__connection-symbol" data-connection-state={status}><ConnectionIcon /></span><strong title={item.title}>{item.title}</strong><span className="dsh-ssh__kind" data-mode={item.mode ?? 'light'}>{item.mode === 'full' ? '全量' : '轻量'}</span></div>
-        <p className="dsh-ssh__destination" title={describeTarget(item.target)}>{item.target.kind.toUpperCase()} · {describeTarget(item.target)}</p>
-        <p className="dsh-ssh__path" title={item.target.remotePath}>{item.target.remotePath}</p>
-        <span className="dsh-ssh__registration" data-connection-state={status} role="status">{disconnecting ? '正在断开' : CONNECTION_LABELS[status]} · {item.mode === 'full' ? '远程 DSH 后端' : '本机 Agent / 远程命令'}</span>
-        {!item.registered && <p className="dsh-ssh__hint">{item.mode === 'full' ? '远端登记已变化。重新添加会恢复目录入口，旧会话保留在远端，不自动关联到新入口。' : '尚未登记，连接后恢复侧栏入口。'}</p>}
-        {status === 'error' && <p className="dsh-ssh__connection-error">{item.connectionError || '连接不可用，请重新连接。'}</p>}
-        {state.confirmRemove === item.id ? <div className="dsh-ssh__remove-confirm">
-          <p>移除此模式的工作区登记？文件和会话历史保留。需要暂停连接时请使用“断开”。</p>
-          <div className="dsh-ssh__actions">
-            <button type="button" className="dsh-ssh__button dsh-ssh__button--danger" onClick={() => manager.remove(item.id)} disabled={busy}>{state.pending.includes(`remove:${item.id}`) ? '移除中…' : '确认移除'}</button>
-            <button type="button" className="dsh-ssh__button" onClick={() => manager.confirmRemove(null)} disabled={busy}>取消</button>
-          </div>
-        </div> : <div className="dsh-ssh__connection-actions">
-          {status === 'connected' && manager.canOpen() && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || !item.registered} title="打开此模式的会话输入页；继续旧对话请从侧栏选择" onClick={() => { void manager.openWorkspace(item.workspaceId) }} aria-label={`在当前窗口打开 ${item.title}`}>{opening ? '打开中…' : '打开项目'}</button>}
-          {item.mode === 'full' && !item.registered ? <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.newProject(item.id, true)} aria-label={`重新添加 ${item.title} 的目录`}>重新添加目录</button> : status !== 'connected' && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`连接 ${item.title}`}>{connecting ? '连接中…' : '连接'}</button>}
-          {(status === 'connected' || status === 'connecting') && <button type="button" className="dsh-ssh__text-button" disabled={disconnecting || (busy && !connecting)} onClick={() => manager.disconnect(item.id)} aria-label={`断开 ${item.title}`}>断开</button>}
-          <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.editConnection(item.id)} aria-label={`设置 ${item.title} 的连接模式`}>连接设置</button>
-          {item.mode === 'full' && <button type="button" className="dsh-ssh__text-button" disabled={busy || status !== 'connected'} onClick={() => manager.loadSkills(item.id)} aria-label={`同步本机 Skill 到 ${item.title}`}>同步 Skill</button>}
-          <details className="dsh-ssh__more"><summary aria-label={`${item.title} 的更多操作`}>更多</summary><div className="dsh-ssh__more-actions">
-            {status === 'connected' && <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.reconnect(item.id)} aria-label={`重新连接 ${item.title}`}>重新连接</button>}
-            <button type="button" className="dsh-ssh__text-button" disabled={busy} onClick={() => manager.newProject(item.id)}>添加同设备项目</button>
-            <button type="button" className="dsh-ssh__text-button dsh-ssh__remove" disabled={busy} onClick={() => manager.confirmRemove(item.id)} aria-label={`移除 ${item.title} 的登记`}>移除登记</button>
-          </div></details>
-        </div>}
-        {item.mode === 'full' && (item.sharedConnectionCount ?? 0) > 1 && <p className="dsh-ssh__hint">同一后端的 {item.sharedConnectionCount} 个全量项目共用连接，断开时一起离线；远端任务继续运行。</p>}
-        {form && <form className="dsh-ssh__credentials" aria-label={`${item.title} 的连接设置`} onSubmit={event => { event.preventDefault(); manager.reconnectWithCredentials() }}>
-          <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mode`}>连接模式<select id={`saved-${item.id}-mode`} value={form.mode} onChange={event => manager.changeConnection('mode', event.target.value)} disabled={busy}><option value="light">轻量模式</option><option value="full">全量模式</option></select></label>
-          <div className="dsh-ssh__scope"><strong>{form.mode === 'full' ? '执行与配置：远端 DSH' : 'Agent 与模型：本机 DSH'}</strong><p>{form.mode === 'full' ? '文件、终端、任务和模型请求都由远端处理。Skill 可选择同步，模型与 MCP 使用远端配置。' : '沿用本机模型和 Skill；文件通过共享目录访问，Bash 在远端执行。适合已有环境与低配置主机。'}</p></div>
-          <p className="dsh-ssh__hint">随时选择连接模式。两种模式使用同一远程目录，分别保留会话历史；切换不会迁移旧会话或停止原模式，可从各自入口继续。</p>
-          {switching && form.mode === 'full' && <p className="dsh-ssh__hint">首次使用全量模式将安装匹配的远端 DSH，模型配置使用远端环境。</p>}
-          {switching && form.mode === 'light' && item.target.kind !== 'wsl' && <label className="dsh-ssh__field" htmlFor={`saved-${item.id}-mount`}>{item.target.kind === 'docker' ? '本机共享/挂载路径' : '本机 SSHFS 挂载路径'}<input id={`saved-${item.id}-mount`} value={form.localPath} onChange={event => manager.changeConnection('localPath', event.target.value)} disabled={busy} placeholder="已有轻量项目可留空复用，否则填写已建立的挂载路径" /></label>}
-          {ssh && <>
-            <p className="dsh-ssh__hint">登录方式：{ssh.auth === 'password' ? '仅密码' : ssh.auth === 'certificate' ? '证书' : ssh.auth === 'key' ? '密钥' : '自动选择'}{ssh.identityFile ? ` · ${ssh.identityFile}` : ''}{ssh.certificateFile ? ` · ${ssh.certificateFile}` : ''}</p>
-            <p className="dsh-ssh__hint">密码和私钥口令仅本次运行保留；留空沿用已提供的凭据。</p>
-            {(!ssh.auth || ssh.auth === 'auto' || ssh.auth === 'password') && <label className="dsh-ssh__field">SSH 密码<input type="password" autoComplete="off" value={form.password} onChange={event => manager.changeCredential('password', event.target.value)} disabled={busy} /></label>}
-            {ssh.auth !== 'password' && <label className="dsh-ssh__field">私钥口令<input type="password" autoComplete="off" value={form.passphrase} onChange={event => manager.changeCredential('passphrase', event.target.value)} disabled={busy} placeholder="未加密私钥可留空" /></label>}
-          </>}
-          <div className="dsh-ssh__actions"><button className="dsh-ssh__button" type="submit" disabled={busy}>{connecting ? '连接中…' : switching ? `以${form.mode === 'full' ? '全量' : '轻量'}模式连接` : '连接此模式'}</button><button className="dsh-ssh__text-button" type="button" onClick={() => manager.editCredentials(null)} disabled={busy}>取消</button></div>
-        </form>}
-      </li>})}
+      {groups.map(group => <Environment key={group.key} manager={manager} state={state} group={group} />)}
     </ul>
     <ModeGuide compact />
   </section>
@@ -540,7 +642,7 @@ function ModeGuide({ compact = false }: { compact?: boolean }) {
     <h3>让项目在合适的位置运行</h3>
     <div><strong>全量模式 <span>完整远程环境</span></strong><p>Agent、文件、终端和后台任务都在远端 DSH 运行。适合长任务、远程依赖与容器开发，无需文件挂载。</p><small>使用远端模型与配置；本机 Skill 可按需同步。</small></div>
     <div><strong>轻量模式 <span>本项目特色</span></strong><p>保留本机 Agent、模型和 Skill，直接操作远程文件与 Bash。远端不安装 DSH，适合 WSL、已有挂载和低配置服务器。</p><small>需要文件共享；使用 Native 工具模式，不提供原生交互终端、PTC 或子代理。</small></div>
-    <p className="dsh-ssh__hint">可随时在“连接设置”中选择另一模式。文件共享，会话分别保留；断开连接不会删除项目。</p>
+    <p className="dsh-ssh__hint">可随时在“项目模式”中选择另一模式。文件共享，会话分别保留；断开连接不会删除项目。</p>
   </aside>
 }
 
