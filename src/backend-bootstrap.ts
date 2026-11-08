@@ -7,6 +7,7 @@ if not re.fullmatch(r'[0-9A-Za-z.+-]+',version): raise ValueError('Invalid DSH v
 project=os.path.realpath(r['path'])
 if not os.path.isdir(project): raise ValueError('Remote project directory does not exist')
 if platform.system()!='Linux': raise RuntimeError('Remote backends currently require Linux or WSL')
+if platform.libc_ver()[0]=='musl' or os.path.isfile('/etc/alpine-release'): raise RuntimeError('Full mode requires glibc Linux; Alpine/musl containers can use light mode with an existing shared mount')
 root=os.path.expanduser('~/.local/share/dsh-ssh-workspaces')
 os.makedirs(root,mode=0o700,exist_ok=True)
 os.chmod(root,0o700)

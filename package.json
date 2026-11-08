@@ -1,7 +1,7 @@
 {
   "name": "dsh-ssh-workspaces",
-  "version": "0.2.6",
-  "description": "SSH and WSL projects in the native DeepSeek Harness sidebar, in the current window",
+  "version": "0.3.0",
+  "description": "SSH, WSL and Docker projects in the native DSH sidebar, with lightweight/full modes and selective Skill sync",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -47,6 +47,8 @@
     "deepseek-harness",
     "ssh",
     "wsl",
+    "docker",
+    "skills",
     "remote-workspace"
   ],
   "engines": {
@@ -98,6 +100,7 @@
     "typescript": "^6.0.0"
   },
   "dependencies": {
-    "ws": "^8.22.1"
+    "ws": "^8.22.1",
+    "yaml": "^2.9.1"
   }
 }

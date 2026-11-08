@@ -33,4 +33,4 @@ try {
 } finally {
   $env:DSH_HOME = $previousDshDataDirectory
 }
-Write-Host 'Installed dsh-ssh-workspaces. Reload DSH after upgrading. Open Remote Workspaces in the left sidebar, then choose Light or Full mode for SSH / WSL.'
+Write-Host 'Installed dsh-ssh-workspaces. Reload DSH after upgrading. Open Remote Workspaces in the left sidebar, then choose Light or Full mode for SSH / WSL / Docker. Connected full projects can selectively sync local Skills.'

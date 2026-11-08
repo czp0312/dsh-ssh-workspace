@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本项目为 DeepSeek Harness 提供 SSH / WSL 远程工作区。在当前客户端窗口和原生项目侧栏中管理远程目录，支持轻量模式与全量模式。
+本项目为 DeepSeek Harness 提供 SSH / WSL / Docker 远程工作区。在当前客户端窗口和原生项目侧栏中管理远程目录，支持轻量模式、全量模式及选择性 Skill 同步。
 
 - 保持原生项目、会话、文件和终端的操作习惯。
 - 轻量模式在本机运行 Agent；全量模式在远端运行 DSH。
@@ -25,6 +25,8 @@
 - `src/client.tsx`、`src/client.css`：管理界面；`src/workspace-badges.ts`：侧栏连接标记。
 - `src/manager.ts`、`src/transport.ts`、`src/tools.ts`：轻量工作区和远程命令。
 - `src/backends.ts`、`src/backend-bootstrap.ts`、`src/client-router.ts`：全量部署、连接和原生请求路由。
+- `src/skills-sync.ts`、`src/skills-helper.ts`：默认预设的技能发现、资源打包、差异比较和远端原子更新。只同步已选择的用户/自定义技能，不覆盖未选择内容或隐式复制凭据。
+- Docker 连接保存容器 ID，不因名称复用切换执行目标；不自动启停容器。轻量 Docker 必须校验双向共享目录。
 - `tests/`：回归测试；`scripts/`：构建、安装和实机验证工具。
 - 不提交 `lib/`、`node_modules/`、打包产物、日志、测试环境状态和本机配置。
 - 不提交密码、私钥、令牌、Cookie、主机指纹记录或带凭据的连接示例。

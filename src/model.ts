@@ -37,6 +37,21 @@ function remotePath(input: unknown): string {
 export function validateTarget(input: unknown): RemoteTarget {
   const value = object(input, 'target')
   const path = remotePath(value.remotePath)
+  if (value.kind === 'docker') {
+    const container = identifier(value.container, 'container')
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(container)) throw new TypeError('无效的 Docker 容器名称或 ID。')
+    const containerName = value.containerName === undefined ? undefined : identifier(value.containerName, 'container name')
+    if (containerName && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(containerName)) throw new TypeError('无效的 Docker 容器显示名称。')
+    const context = value.context === undefined ? undefined : identifier(value.context, 'Docker context')
+    if (context && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(context)) throw new TypeError('无效的 Docker context 名称。')
+    const via = value.via === undefined ? undefined : validateTarget(value.via)
+    if (via && via.kind !== 'ssh') throw new TypeError('Docker 的远程宿主必须是 SSH。')
+    if (via && context) throw new TypeError('Docker context 与 SSH 宿主不能同时指定。')
+    const user = value.user === undefined ? undefined : text(value.user, 'Docker user').trim()
+    if (user && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]*)?$/.test(user)) throw new TypeError('Docker 用户应为用户名或 UID，可附带 :组名 / GID。')
+    if (user === '') throw new TypeError('Docker user must be nonempty')
+    return { kind: 'docker', container, remotePath: path, ...(containerName ? { containerName } : {}), ...(context ? { context } : {}), ...(via ? { via } : {}), ...(user ? { user } : {}) }
+  }
   const user = value.user === undefined ? undefined : identifier(value.user, 'user')
   if (user !== undefined && /\s/u.test(user)) throw new TypeError('user must not contain whitespace')
 
@@ -76,7 +91,7 @@ export function validateTarget(input: unknown): RemoteTarget {
     if (certificateFile && auth !== 'certificate') throw new TypeError('证书文件只能用于证书登录方式。')
     return { kind: 'ssh', host, ...(port === undefined ? {} : { port: port as number }), ...(user === undefined ? {} : { user }), ...(identityFile === undefined ? {} : { identityFile }), ...(auth === undefined ? {} : { auth: auth as SshTarget['auth'] }), ...(certificateFile ? { certificateFile } : {}), remotePath: path }
   }
-  throw new TypeError('target.kind must be ssh or wsl')
+  throw new TypeError('target.kind must be ssh, wsl or docker')
 }
 
 /** Lexical normalization only: a disconnected mount need not currently exist. */
@@ -175,6 +190,7 @@ export function remoteWorkdir(
 
 export function targetKey(target: RemoteTarget): string {
   const value = validateTarget(target)
+  if (value.kind === 'docker') return JSON.stringify(['docker', value.context ?? '', value.via ? targetKey({ ...value.via, remotePath: '/' }) : '', value.container, value.user ?? '', value.remotePath])
   return value.kind === 'ssh'
     ? JSON.stringify(['ssh', value.host.toLowerCase(), value.port ?? 22, value.user ?? '', value.remotePath, ...(value.identityFile ? [value.identityFile] : []), ...(value.auth && value.auth !== 'auto' && value.auth !== 'key' ? [value.auth] : []), ...(value.certificateFile ? [value.certificateFile] : [])])
     : JSON.stringify(['wsl', value.distribution.toLowerCase(), value.user ?? '', value.remotePath])

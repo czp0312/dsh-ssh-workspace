@@ -28,7 +28,31 @@ export interface SshTarget {
 /** RPC-only input. Never place these fields on a target or durable workspace. */
 export interface SshCredentials { password?: string; passphrase?: string }
 
-export type RemoteTarget = WslTarget | SshTarget
+export interface DockerTarget {
+  kind: 'docker'
+  /** Full container ID is saved on first connection to avoid following a reused name. */
+  container: string
+  containerName?: string
+  context?: string
+  /** Execute Docker on an SSH host; mutually exclusive with a local Docker context. */
+  via?: SshTarget
+  user?: string
+  remotePath: string
+}
+
+export interface DockerHost { context?: string; via?: SshTarget }
+export interface DockerContainer { id: string; name: string; image: string; state: string; status: string }
+export type RemoteTarget = WslTarget | SshTarget | DockerTarget
+
+export function sshTarget(target: RemoteTarget): SshTarget | undefined {
+  return target.kind === 'ssh' ? target : target.kind === 'docker' ? target.via : undefined
+}
+
+export function targetLabel(target: RemoteTarget): string {
+  if (target.kind === 'wsl') return target.distribution
+  if (target.kind === 'ssh') return `${target.user ? target.user + '@' : ''}${target.host}${target.port ? ':' + target.port : ''}`
+  return `${target.containerName ?? target.container.slice(0, 24)}${target.via ? ' · SSH ' + targetLabel(target.via) : target.context ? ' · ' + target.context : ' · Docker'}${target.user ? ' · ' + target.user : ''}`
+}
 export type WorkspaceMode = 'light' | 'full'
 export type ConnectionState = 'connected' | 'disconnected' | 'connecting' | 'error'
 
@@ -113,6 +137,7 @@ export interface PluginConfig {
   stateFile?: string
   sshExecutable?: string
   wslExecutable?: string
+  dockerExecutable?: string
   pythonExecutable?: string
   connectTimeoutMs?: number
   /** Optional separate host-key store, primarily for isolated integration tests. */

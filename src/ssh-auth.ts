@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateTarget } from './model.js'
-import type { RemoteTarget, SshCredentials } from './types.js'
+import { sshTarget, type RemoteTarget, type SshCredentials } from './types.js'
 
 export function validateCredentials(input: unknown): SshCredentials {
   if (input === undefined) return {}
@@ -21,8 +21,8 @@ export function validateCredentials(input: unknown): SshCredentials {
 }
 
 function connectionKey(input: RemoteTarget): string {
-  const target = validateTarget(input)
-  return target.kind !== 'ssh' ? '' : JSON.stringify([target.host.toLowerCase(), target.port ?? 22, target.user ?? '', target.auth ?? (target.identityFile ? 'key' : 'auto'), target.identityFile ?? '', target.certificateFile ?? ''])
+  const target = sshTarget(validateTarget(input))
+  return !target ? '' : JSON.stringify([target.host.toLowerCase(), target.port ?? 22, target.user ?? '', target.auth ?? (target.identityFile ? 'key' : 'auto'), target.identityFile ?? '', target.certificateFile ?? ''])
 }
 
 /** Secrets live only here. The helper receives a random IPC capability, never a secret in argv/env/files. */
@@ -39,9 +39,10 @@ export class SshAuthBroker {
     if (this.disposed) throw new Error('SSH 认证服务已关闭。')
     const key = connectionKey(target)
     const credentials = validateCredentials(input)
+    const ssh = sshTarget(target)
     if (!key || !Object.keys(credentials).length) return
-    if (target.kind === 'ssh' && (target.auth === 'key' || target.auth === 'certificate') && credentials.password) throw new Error('密钥和证书方式不使用登录密码。')
-    if (target.kind === 'ssh' && target.auth === 'password' && credentials.passphrase) throw new Error('仅密码方式不使用私钥口令。')
+    if ((ssh?.auth === 'key' || ssh?.auth === 'certificate') && credentials.password) throw new Error('密钥和证书方式不使用登录密码。')
+    if (ssh?.auth === 'password' && credentials.passphrase) throw new Error('仅密码方式不使用私钥口令。')
     this.entries.set(key, { token: this.entries.get(key)?.token ?? randomBytes(32).toString('hex'), credentials })
   }
 
@@ -51,7 +52,7 @@ export class SshAuthBroker {
     if (this.disposed) throw new Error('SSH 认证服务已关闭。')
     const entry = this.entries.get(connectionKey(target))
     if (!entry) {
-      if (target.kind === 'ssh' && target.auth === 'password') throw new Error('请重新输入 SSH 密码；密码仅保留在当前进程内，重启后不会保存。')
+      if (sshTarget(target)?.auth === 'password') throw new Error('请重新输入 SSH 密码；密码仅保留在当前进程内，重启后不会保存。')
       return { SSH_ASKPASS_REQUIRE: 'never' }
     }
     await (this.starting ??= this.start())

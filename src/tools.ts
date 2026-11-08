@@ -7,7 +7,7 @@ import { approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sand
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { remoteWorkdir } from './model.js'
 import type { RemoteTransport } from './transport.js'
-import type { SavedWorkspace } from './types.js'
+import { targetLabel, type SavedWorkspace } from './types.js'
 
 export interface WorkingDirectoryApi {
   ensure(agent: Agent, signal?: AbortSignal): Promise<string | undefined>
@@ -41,7 +41,7 @@ export function bindRemoteAgent(
   connection?: { assertAvailable(): void },
 ): void {
   const ctx = agent.ctx
-  const label = workspace.target.kind === 'wsl' ? `WSL ${workspace.target.distribution}` : `SSH ${workspace.target.host}`
+  const label = `${workspace.target.kind.toUpperCase()} ${targetLabel(workspace.target)}`
   const tool = defineTool({
     name: 'remote_bash',
     description: `Run a foreground Bash command on ${label}. The remote project is ${workspace.target.remotePath}. `

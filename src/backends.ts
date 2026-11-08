@@ -5,7 +5,7 @@ import { BACKEND_BOOTSTRAP } from './backend-bootstrap.js'
 import { BackendTunnel, BackendWire } from './backend-wire.js'
 import { remoteId } from './backend-protocol.js'
 import { targetKey, validateTarget } from './model.js'
-import { VERIFIED_DSH_VERSION, type ConnectionHealth, type PluginConfig, type RemoteTarget, type SavedWorkspace, type WorkspaceView } from './types.js'
+import { VERIFIED_DSH_VERSION, targetLabel, type ConnectionHealth, type PluginConfig, type RemoteTarget, type SavedWorkspace, type WorkspaceView } from './types.js'
 import type { RemoteTransport } from './transport.js'
 
 export interface BackendProject extends SavedWorkspace { backendId: string; backend: true; workspace: any }
@@ -18,6 +18,7 @@ export class RemoteBackends {
   private paused = new Set<string>()
   private health = new Map<string, ConnectionHealth>()
   private epochs = new Map<string, number>()
+  private operations = new Map<string, AbortController>()
   private publication = Promise.resolve()
   private disposed = false
   constructor(private file: string, private transport: RemoteTransport, private config: PluginConfig = {}) {}
@@ -50,6 +51,7 @@ export class RemoteBackends {
   }
   private blocked(id: string): boolean { return this.paused.has(id) || this.records.some(row => row.backendId === id && row.disconnected) }
   private key(target: RemoteTarget): string {
+    if (target.kind === 'docker') return createHash('sha256').update(targetKey({ ...target, remotePath: '/' })).digest('hex').slice(0, 24)
     const connection = target.kind === 'wsl'
       ? { kind: target.kind, distribution: target.distribution, user: target.user ?? '' }
       : { kind: target.kind, host: target.host, port: target.port ?? null, user: target.user ?? '', ...(target.identityFile ? { identityFile: target.identityFile } : {}), ...(target.auth && target.auth !== 'auto' && target.auth !== 'key' ? { auth: target.auth } : {}), ...(target.certificateFile ? { certificateFile: target.certificateFile } : {}) }
@@ -82,7 +84,7 @@ export class RemoteBackends {
       const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])
       this.health.set(id, { connectionState: 'connecting' })
       const done = (async () => {
-        if (running) { this.running.delete(id); running.wire.close(); await running.tunnel.close() }
+        if (running) await this.closeRunning(id)
         const next = await this.createConnection(target, combined)
         if (this.disposed || combined.aborted || (!explicit && this.blocked(id))) {
           next.wire.close(); await next.tunnel.close()
@@ -105,9 +107,21 @@ export class RemoteBackends {
     if (!record) throw new Error('Unknown remote DSH backend')
     return (await this.ensure(record.target, id, signal)).wire
   }
+
+  /** Management writes require an already connected project and cannot reconnect it. */
+  workspaceOperation(id: string): { target: RemoteTarget; signal: AbortSignal } {
+    const record = this.records.find(row => row.id === id && row.removedAt === undefined)
+    if (!record) throw new Error('请为全量工作区选择同步。')
+    const running = this.running.get(record.backendId)
+    if (this.blocked(record.backendId) || !running || running.wire.isStale) throw new Error('请先连接此全量工作区，再同步技能。')
+    let controller = this.operations.get(record.backendId)
+    if (!controller) { controller = new AbortController(); this.operations.set(record.backendId, controller) }
+    return { target: structuredClone(record.target), signal: controller.signal }
+  }
   async add(input: unknown, signal?: AbortSignal): Promise<BackendProject> {
     const request = input as { target: unknown; title?: string }
-    const target = validateTarget(request?.target)
+    const parsed = validateTarget(request?.target)
+    const target = await this.transport.canonicalTarget?.(parsed, signal) ?? parsed
     if (request.title !== undefined && (typeof request.title !== 'string' || request.title.length > 256)) throw new Error('Invalid workspace title')
     const id = this.findTarget(target)?.backendId ?? this.key(target)
     const epoch = this.epochs.get(id) ?? 0
@@ -115,7 +129,7 @@ export class RemoteBackends {
     const response = await running.wire.rpc('workspace/create', { args: { request: { path: target.remotePath } } }, signal) as any
     if (!response.result?.ok) throw new Error(response.result?.error?.message || 'Cannot create remote workspace')
     let workspace = response.result.value.workspace
-    const title = request.title?.trim() || `${posix.basename(target.remotePath) || '/'} · ${target.kind === 'wsl' ? target.distribution : target.host}`
+    const title = request.title?.trim() || `${posix.basename(target.remotePath) || '/'} · ${targetLabel(target)}`
     const renamed = await running.wire.rpc('workspace/rename', { args: { request: { workspaceId: workspace.workspaceId, title } } }, signal) as any
     if (!renamed.result?.ok) throw new Error(renamed.result?.error?.message || 'Cannot name remote workspace')
     workspace = { ...workspace, title }
@@ -159,6 +173,8 @@ export class RemoteBackends {
   }
 
   private async closeRunning(id: string): Promise<void> {
+    this.operations.get(id)?.abort(new Error('连接已变化，请重新读取技能列表。'))
+    this.operations.delete(id)
     const previous = this.running.get(id)
     if (!previous) return
     this.running.delete(id); previous.wire.close(); await previous.tunnel.close()
@@ -195,6 +211,8 @@ export class RemoteBackends {
   }
   async dispose(): Promise<void> {
     this.disposed = true
+    for (const controller of this.operations.values()) controller.abort()
+    this.operations.clear()
     for (const flight of this.flights.values()) flight.controller.abort()
     await Promise.allSettled([...this.flights.values()].map(flight => flight.done))
     for (const running of this.running.values()) { running.wire.close(); await running.tunnel.close() }

@@ -68,6 +68,30 @@ test('rejects wrong mount and removes its remote identity probe', async t => {
   assert.equal(f.cleanups(), 1)
 })
 
+test('lightweight Docker pins its container identity and proves a bidirectional shared path', async t => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }))
+  f.transport.canonicalTarget = async target => target.kind === 'docker' ? { ...target, container: 'a'.repeat(64), containerName: target.container } : target
+  const docker = { kind: 'docker' as const, container: 'demo-api', context: 'dev', user: 'developer', remotePath: '/workspace' }
+  const record = await f.manager.add({ target: docker, localPath: f.mount })
+  assert.equal(record.target.kind === 'docker' && record.target.container, 'a'.repeat(64))
+  assert.match(record.title, /demo-api/)
+  assert.equal(f.cleanups(), 1)
+  const stored = new WorkspaceStore(f.statePath)
+  await stored.load()
+  assert.equal(stored.list()[0]!.target.kind, 'docker')
+  assert.equal((stored.list()[0]!.target as typeof docker).context, 'dev')
+})
+
+test('lightweight Docker rejects missing or incorrect shared paths without registering a local project', async t => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }))
+  const target = { kind: 'docker', container: 'demo-api', remotePath: '/workspace' }
+  await assert.rejects(f.manager.add({ target }), /需要填写本机共享/)
+  await assert.rejects(f.manager.add({ target, localPath: f.wrong }), /不一致/)
+  assert.equal(f.workspaces.size, 0)
+  assert.equal(f.store.list().length, 0)
+  assert.equal(f.cleanups(), 1)
+})
+
 test('does not rebind an existing local project to SSH', async t => {
   const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }))
   const existing = await f.registry.create(f.mount, 'Local project')

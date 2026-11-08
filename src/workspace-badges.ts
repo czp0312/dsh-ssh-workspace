@@ -1,4 +1,4 @@
-import type { WorkspaceView } from './types.js'
+import { targetLabel, type WorkspaceView } from './types.js'
 import { connectionState, CONNECTION_LABELS } from './connection-status.js'
 
 // DSH 0.2.2-rc.1 ProjectRow exposes this identity, but no title-decoration slot.
@@ -10,9 +10,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg'
 
 function tooltip(workspace: WorkspaceView): string {
   const target = workspace.target
-  const location = target.kind === 'wsl'
-    ? `WSL · ${target.distribution}${target.user ? ` · ${target.user}` : ''}`
-    : `SSH · ${target.user ? `${target.user}@` : ''}${target.host}${target.port ? `:${target.port}` : ''}`
+  const location = `${target.kind.toUpperCase()} · ${targetLabel(target)}`
   return `远程项目 · ${CONNECTION_LABELS[connectionState(workspace)]} · ${location} · ${workspace.mode === 'full' ? '全量模式（远端 DSH）' : '轻量模式（本机 Agent）'}${workspace.connectionError ? ` · ${workspace.connectionError}` : ''}`
 }
 

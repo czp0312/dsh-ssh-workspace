@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { validateTarget as validateModelTarget } from './model.js'
 import { REMOTE_HELPER, type HelperRequest } from './remote-helper.js'
 import { SshAuthBroker } from './ssh-auth.js'
-import type { CommandResult, PluginConfig, RemoteDirectory, RemoteInfo, RemoteTarget, RunOptions } from './types.js'
+import { sshTarget, type CommandResult, type DockerHost, type DockerContainer, type PluginConfig, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type RunOptions, type SshTarget, type WslTarget } from './types.js'
 
 const DEFAULT_TIMEOUT = 120_000
 const MAX_TIMEOUT = 600_000
@@ -21,7 +21,7 @@ const PROBE_TOKEN = /^[a-f0-9]{64}$/
 export interface Invocation { executable: string; args: string[]; env?: NodeJS.ProcessEnv }
 type StopReason = 'aborted' | 'timedOut'
 interface Job { stop(reason: StopReason): void; done: Promise<CommandResult> }
-type Settings = Required<Pick<PluginConfig, 'sshExecutable' | 'wslExecutable' | 'pythonExecutable' | 'connectTimeoutMs'>> & Pick<PluginConfig, 'knownHostsFile'>
+type Settings = Required<Pick<PluginConfig, 'sshExecutable' | 'wslExecutable' | 'dockerExecutable' | 'pythonExecutable' | 'connectTimeoutMs'>> & Pick<PluginConfig, 'knownHostsFile'>
 
 function text(value: unknown, label: string, max = 4096): string {
   if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value) || Buffer.byteLength(value) > max) {
@@ -42,6 +42,7 @@ function settings(config: PluginConfig): Settings {
   return {
     sshExecutable: text(config.sshExecutable ?? (process.platform === 'win32' ? 'ssh.exe' : 'ssh'), 'SSH executable'),
     wslExecutable: text(config.wslExecutable ?? 'wsl.exe', 'WSL executable'),
+    dockerExecutable: text(config.dockerExecutable ?? (process.platform === 'win32' ? 'docker.exe' : 'docker'), 'Docker executable'),
     pythonExecutable: text(config.pythonExecutable ?? 'python3', 'Python executable'),
     connectTimeoutMs: integer(config.connectTimeoutMs, 10_000, 1, 120_000, 'connectTimeoutMs'),
     ...(config.knownHostsFile ? { knownHostsFile: text(config.knownHostsFile, 'known hosts file') } : {}),
@@ -58,7 +59,7 @@ function remotePath(value: unknown): string {
 function validateTarget(input: RemoteTarget): RemoteTarget {
   const target = validateModelTarget(input)
   remotePath(target.remotePath)
-  if (target.user !== undefined && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*\$?$/.test(text(target.user, 'remote user', 128))) {
+  if (target.kind !== 'docker' && target.user !== undefined && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*\$?$/.test(text(target.user, 'remote user', 128))) {
     throw new TypeError('Invalid remote user')
   }
   if (target.kind === 'wsl') {
@@ -70,7 +71,7 @@ function validateTarget(input: RemoteTarget): RemoteTarget {
     const ip = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
     if (!isIP(ip) && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(host)) throw new TypeError('Invalid SSH host')
     if (target.port !== undefined) integer(target.port, 22, 1, 65535, 'SSH port')
-  } else {
+  } else if (target.kind !== 'docker') {
     throw new TypeError('Invalid remote target kind')
   }
   return target
@@ -85,8 +86,8 @@ function identityPath(path: string): string { return /^~[/\\]/u.test(path) ? joi
 
 /** Check metadata/read permission only; never read, upload or copy private-key bytes. */
 export async function validateIdentityFile(input: RemoteTarget): Promise<void> {
-  const target = validateTarget(input)
-  if (target.kind !== 'ssh') return
+  const target = sshTarget(validateTarget(input))
+  if (!target) return
   for (const [file, label] of [[target.identityFile, '私钥'], [target.certificateFile, '证书']] as const) {
     if (!file) continue
     const path = identityPath(file)
@@ -107,7 +108,27 @@ export function buildPythonInvocation(target: RemoteTarget, script: string, requ
   target = validateTarget(target)
   const cfg = settings(config)
   const encoded = Buffer.from(JSON.stringify(request), 'utf8').toString('base64')
-  const python = [cfg.pythonExecutable, '-u', '-c', script, encoded]
+  // docker exec preserves the image's HOME even for --user; resolve the selected
+  // identity from passwd before DSH or any skill resolves its user directories.
+  if (target.kind === 'docker') {
+    const source = 'import os,pwd\nu=pwd.getpwuid(os.geteuid())\nos.environ.update(HOME=u.pw_dir,USER=u.pw_name,LOGNAME=u.pw_name)\n' + script
+    return buildDockerInvocation(target, ['exec', '-i', ...(target.user ? ['--user', target.user] : []), target.container, cfg.pythonExecutable, '-u', '-c', source, encoded], config, allowPrompts)
+  }
+  return buildCommandInvocation(target, [cfg.pythonExecutable, '-u', '-c', script, encoded], config, allowPrompts)
+}
+
+export function buildDockerInvocation(host: DockerHost, args: string[], config: PluginConfig = {}, allowPrompts = false): Invocation {
+  const canonical = validateModelTarget({ kind: 'docker', container: 'validation', remotePath: '/', ...host })
+  if (canonical.kind !== 'docker') throw new Error('Invalid Docker host')
+  const cfg = settings(config)
+  const argv = [...(canonical.context ? ['--context', canonical.context] : []), ...args]
+  return canonical.via ? buildCommandInvocation(canonical.via, ['docker', ...argv], config, allowPrompts)
+    : checkInvocation({ executable: cfg.dockerExecutable, args: argv })
+}
+
+function buildCommandInvocation(target: SshTarget | WslTarget, python: string[], config: PluginConfig, allowPrompts: boolean): Invocation {
+  target = validateTarget(target) as SshTarget | WslTarget
+  const cfg = settings(config)
   let invocation: Invocation
   if (target.kind === 'wsl') {
     invocation = { executable: cfg.wslExecutable, args: [
@@ -131,6 +152,10 @@ export function buildPythonInvocation(target: RemoteTarget, script: string, requ
       python.map(quotePosix).join(' '),
     ] }
   }
+  return checkInvocation(invocation)
+}
+
+function checkInvocation(invocation: Invocation): Invocation {
   // Leave room for CreateProcessW's quoting and executable path (32767 UTF-16 units).
   const windowsSize = invocation.executable.length + invocation.args.reduce((size, arg) => size + arg.length + (arg.match(/["\\]/g)?.length ?? 0) + 3, 0)
   if (windowsSize > 30_000) throw new TypeError('Remote request exceeds the Windows command-line limit')
@@ -202,7 +227,7 @@ export class RemoteTransport {
   async pythonInvocation(target: RemoteTarget, script: string, payload: unknown, cleanup = false): Promise<Invocation> {
     if (!cleanup) this.assertOpen()
     await validateIdentityFile(target)
-    const env = { ...transportEnvironment(), ...await this.auth.environment(target) }
+    const env = { ...transportEnvironment(), ...(target.kind === 'docker' && !target.via ? dockerEnvironment() : {}), ...await this.auth.environment(target) }
     return { ...buildPythonInvocation(target, script, payload, this.config, this.auth.has(target)), env }
   }
 
@@ -214,6 +239,49 @@ export class RemoteTransport {
     const result = await this.execute(invocation, 600_000, DEFAULT_OUTPUT, signal)
     this.requireSuccess(result)
     return JSON.parse(result.stdout) as T
+  }
+
+  /** Bulk skill bytes go over stdin, never argv, environment or a temporary file. */
+  async pythonInput<T>(target: RemoteTarget, script: string, payload: unknown, signal?: AbortSignal): Promise<T> {
+    this.assertOpen()
+    signal?.throwIfAborted()
+    const bytes = Buffer.from(JSON.stringify(payload) + '\n')
+    if (bytes.length > 30 * 1024 * 1024) throw new Error('同步内容超过单次 30 MiB 传输上限。')
+    const invocation = await this.pythonInvocation(target, script, {})
+    signal?.throwIfAborted()
+    const result = await this.execute(invocation, 120_000, 8 * 1024 * 1024, signal, bytes)
+    this.requireSuccess(result)
+    return JSON.parse(result.stdout) as T
+  }
+
+  private async docker(host: DockerHost, args: string[], signal?: AbortSignal): Promise<string> {
+    this.assertOpen()
+    const target = validateTarget({ kind: 'docker', container: 'validation', remotePath: '/', ...host })
+    await validateIdentityFile(target)
+    const invocation = buildDockerInvocation(host, args, this.config, this.auth.has(target))
+    invocation.env = { ...transportEnvironment(), ...(!host.via ? dockerEnvironment() : {}), ...await this.auth.environment(target) }
+    const result = await this.execute(invocation, this.requestTimeout, DEFAULT_OUTPUT, signal)
+    this.requireSuccess(result)
+    return result.stdout
+  }
+
+  async listDocker(host: DockerHost = {}, signal?: AbortSignal): Promise<DockerContainer[]> {
+    const output = await this.docker(host, ['ps', '--all', '--no-trunc', '--format', '{{json .}}'], signal)
+    return output.split(/\r?\n/).filter(Boolean).map(line => {
+      const row = JSON.parse(line)
+      if (!/^[a-f0-9]{64}$/.test(row.ID) || typeof row.Names !== 'string' || typeof row.Image !== 'string' || typeof row.State !== 'string') throw new Error('Invalid Docker container response')
+      return { id: row.ID, name: row.Names, image: row.Image, state: row.State, status: String(row.Status ?? '') }
+    })
+  }
+
+  async canonicalTarget(input: RemoteTarget, signal?: AbortSignal): Promise<RemoteTarget> {
+    const target = validateTarget(input)
+    if (target.kind !== 'docker') return target
+    const info = JSON.parse(await this.docker(target, ['inspect', '--type', 'container', '--format', '{"id":{{json .Id}},"running":{{json .State.Running}},"name":{{json .Name}}}', target.container], signal))
+    if (!/^[a-f0-9]{64}$/.test(info.id)) throw new Error('Invalid Docker container identity')
+    if (info.running !== true) throw new Error('容器尚未运行，请先在 Docker 中启动容器，再连接工作区。')
+    const containerName = typeof info.name === 'string' ? info.name.replace(/^\//, '') : target.containerName ?? target.container
+    return validateTarget({ ...target, container: info.id, containerName })
   }
 
   async listWsl(signal?: AbortSignal): Promise<string[]> {
@@ -337,7 +405,7 @@ export class RemoteTransport {
     }
   }
 
-  private execute(invocation: Invocation, timeoutMs: number, maxOutput: number, signal?: AbortSignal): Promise<CommandResult & { rawStdout: Buffer }> {
+  private execute(invocation: Invocation, timeoutMs: number, maxOutput: number, signal?: AbortSignal, input?: Buffer): Promise<CommandResult & { rawStdout: Buffer }> {
     const empty = { exitCode: null, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false, timedOut: false, aborted: true, rawStdout: Buffer.alloc(0) }
     if (signal?.aborted) return Promise.resolve(empty)
     const stdout = new Capture(maxOutput)
@@ -405,7 +473,11 @@ export class RemoteTransport {
     deadline = setTimeout(() => stop('timedOut'), timeoutMs)
     heartbeat = setInterval(beat, 1_000)
     signal?.addEventListener('abort', onAbort, { once: true })
-    if (signal?.aborted) onAbort(); else beat()
+    if (signal?.aborted) onAbort(); else { if (input) child.stdin.write(input); beat() }
     return done
   }
+}
+
+function dockerEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'].flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 }

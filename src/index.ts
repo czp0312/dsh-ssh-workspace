@@ -16,6 +16,7 @@ import { PLUGIN_VERSION, VERIFIED_DSH_VERSION } from './types.js'
 import type { PluginConfig, ReconnectRequest } from './types.js'
 import { RemoteBackends } from './backends.js'
 import { WorkspaceConnections } from './connections.js'
+import { SkillSync, localSkillRegistry, type PresetScopes, type SkillRegistry } from './skills-sync.js'
 
 export type { PluginConfig as Config } from './types.js'
 export const name = 'dsh-ssh-workspaces'
@@ -54,6 +55,10 @@ export async function apply(ctx: Context, config: PluginConfig = {}): Promise<vo
   const backends = new RemoteBackends(join(dirname(stateFile), 'ssh-backends.json'), transport, config)
   await backends.load()
   const connections = new WorkspaceConnections(manager, backends)
+  const skills = new SkillSync(() => {
+    const registry = ctx.get('skills' as any) as SkillRegistry | undefined
+    return registry ? localSkillRegistry(registry, ctx.get('agentPresets' as any) as PresetScopes | undefined) : undefined
+  }, transport)
   ctx.effect(() => {
     const lifetime = new AbortController()
     let checking = false
@@ -104,9 +109,29 @@ export async function apply(ctx: Context, config: PluginConfig = {}): Promise<vo
           value = { pluginVersion: PLUGIN_VERSION, verifiedDshVersion: VERIFIED_DSH_VERSION, platform: process.platform, workspaces: connections.list(), sources: backends.sources(), modes: ['light', 'full'] }
           break
         case 'wsl/list': value = await transport.listWsl(signal); break
+        case 'docker/list': {
+          const request = object(payload)
+          const target = validateTarget({ kind: 'docker', container: 'list', remotePath: '/', context: request.context, via: request.via })
+          if (target.kind !== 'docker') throw new Error('Invalid Docker host')
+          transport.setCredentials(target, request.credentials)
+          value = await transport.listDocker(target, signal); break
+        }
+        case 'skills/preview': {
+          const id = idOf(payload)
+          const remote = backends.workspaceOperation(id)
+          value = await skills.preview(id, remote.target, remote.signal, signal); break
+        }
+        case 'skills/apply': {
+          const id = idOf(payload)
+          backends.workspaceOperation(id)
+          const request = object(payload)
+          value = await skills.apply(id, request.planId, request.selected, request.overwrite, signal); break
+        }
         case 'test': {
           const request = object(payload)
-          const target = validateTarget(request.target)
+          const parsed = validateTarget(request.target)
+          transport.setCredentials(parsed, request.credentials)
+          const target = await transport.canonicalTarget(parsed, signal)
           transport.setCredentials(target, request.credentials)
           value = await transport.inspect(target, signal); break
         }

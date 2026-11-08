@@ -17,7 +17,7 @@ npm pack
 从仓库根目录把本地包安装到测试 profile：
 
 ```sh
-dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.2.6.tgz
+dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.0.tgz
 ```
 
 测试前应通过独立 `DSH_HOME` 配置隔离数据目录，并启动同名 profile。不要直接修改正在使用的桌面 profile 来做安装试验。
@@ -34,12 +34,13 @@ dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.2.6.tgz
 | `src/backends.ts`、`src/backend-bootstrap.ts` | 全量后端安装、生命周期与隧道 |
 | `src/client-router.ts`、`src/backend-protocol.ts` | 原生客户端请求分流和后端 ID 转换 |
 | `src/connections.ts`、`src/storage.ts` | 两种模式的连接管理、模式切换及持久化 |
+| `src/skills-sync.ts`、`src/skills-helper.ts` | 默认预设技能发现、差异计划与远端资源导入 |
 | `tests/` | 单元、协议、加载和界面回归测试 |
 | `scripts/` | 构建、桌面安装及实机验证 |
 
 ## 运行边界
 
-轻量模式使用本机 Agent，文件通过 WSL 共享或已有 SSHFS 挂载访问，命令由会话专属的 `remote_bash` 执行。每条命令独立执行；原生终端、PTC / `run_code`、后台任务、子代理和 worktree 没有接入轻量传输。
+轻量模式使用本机 Agent，文件通过 WSL 共享、已有 SSHFS 挂载或 Docker 共享目录访问，命令由会话专属的 `remote_bash` 经 SSH / WSL / Docker exec 执行。每条命令独立执行；原生终端、PTC / `run_code`、后台任务、子代理和 worktree 没有接入轻量传输。
 
 全量模式在远端运行版本匹配的 DSH，将原生请求、事件、终端上下行和文件数据经本机 broker 转发。全量项目和会话使用 `dsh-remote:<backendId>:<id>` 命名空间，避免不同后端产生相同 ID 时冲突。
 
@@ -95,6 +96,20 @@ npx tsx scripts/smoke-backend.ts
 `smoke-backend.ts` 面向已准备好的 `Ubuntu-22.04` 及专用测试目录，验证真实远端 DSH 的会话创建、工作区流、终端、文件、附件上传、事件握手，以及全量 → 轻量 → 全量、断开 / 重连与原会话保留。脚本会启动或复用远端后端，但不主动发起付费模型请求。运行前阅读脚本并确认发行版及测试路径适合当前环境。
 
 WSL 验证不能替代真实 SSH 服务器验证；密码、密钥和证书等认证方式也应分别记录验证范围。不要将测试服务器地址或凭据写入公开文档。
+
+## Docker 与 Skill 同步的验证边界
+
+Docker 在传输层复用 Python helper 与字节隧道，本机 CLI 采用无 shell 的 argv；SSH Docker 把受控的 Docker argv 传给原有 SSH 通道，并复用进程内认证服务。`docker exec -i` 不分配 TTY，避免修改 HTTP / WebSocket 字节。首次连接通过 inspect 固定容器 ID，后续重连不能跟随复用的容器名。指定容器用户时依据 passwd 还原其 HOME，避免把其他用户的数据写入镜像默认 HOME。
+
+轻量 Docker 与轻量 SSH 均需双向文件探针证明共享目录正确。全量 Docker 与其他全量连接复用后端生命周期；不会调用 `docker start`、`stop`、`run` 或修改镜像。
+
+`skills-sync.ts` 通过 DSH 默认预设的 standing scope 读取技能注册表，释放 scope 不创建会话或 Agent。候选仅包含用户和自定义技能；导出目录资源、大小校验和哈希均在本机完成。同步计划绑定工作区、连接生命周期、来源哈希和远端目录哈希，十分钟失效且只消费一次。
+
+`skills-helper.ts` 在远端只允许用户技能目录下的受控条目写入。大文件经 stdin 传输，避免 Windows 命令行长度上限；导入先校验路径、大小和哈希，再同盘暂存、备份与重命名，失败还原旧目录。`.env`、Git、依赖目录和缓存不导出；包含这些远端数据的目标不自动覆盖。导入锁只串行本插件的写入，目录哈希在提交前再检查；其他程序不遵循锁协议时仍存在最终检查与重命名间的极短竞态，不宣称跨进程事务隔离。
+
+测试使用临时 DSH / Agents HOME，在真实 WSL Python 下覆盖资源传输、可执行脚本、缺失/一致/差异、显式更新、并发变化、跨工作区计划隔离、目录穿越和目标符号链接。DSH 实机验收使用独立本机 profile 和公开演示技能，已通过远端 `skills/list` 确认同步后的技能可被原生目录发现。
+
+Docker 当前只有连接边界、认证复用、完整 ID、停止容器拒绝和 UI 回归；维护者需要在有 Docker daemon 的环境继续运行真实容器验收，不能把这些测试写成端到端 Docker 验收。
 
 ## 文档与市场维护
 

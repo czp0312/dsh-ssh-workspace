@@ -438,3 +438,65 @@ test('a persisted registration alone never displays a green online state', async
     assert.equal(button('连接 legacy-project').disabled, false)
   } finally { await fixture.dispose() }
 })
+
+test('Docker supports context discovery, a separate SSH engine identity, and lightweight shared paths', async () => {
+  const containerId = 'a'.repeat(64)
+  const fixture = await mount({ respond(method) {
+    if (method === 'docker/list') return { ok: true, value: [{ id: containerId, name: 'demo-api', image: 'demo:latest', state: 'running', status: 'Up' }] }
+  } })
+  try {
+    await click(button('远程工作区')); await click(button('DOCKER'))
+    await input('context', 'development')
+    await click(button('读取容器'))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'docker/list').input, { context: 'development' })
+    await click(document.querySelector('.dsh-ssh__container-list button'))
+    assert.equal(document.querySelector('input[id$="-container"]').value, containerId)
+    await select('dockerLocation', 'ssh')
+    await input('host', 'docker-host'); await input('port', '2222'); await input('user', 'developer')
+    await input('dockerUser', 'app-user')
+    await select('sshAuth', 'password'); await input('password', 'synthetic-docker-password')
+    await input('path', '/workspace/demo')
+    await click(button('测试连接'))
+    const tested = fixture.calls.find(call => call.method === 'test').input
+    assert.deepEqual(tested.target, { kind: 'docker', container: containerId, user: 'app-user', remotePath: '/workspace/demo', via: { kind: 'ssh', host: 'docker-host', port: 2222, user: 'developer', auth: 'password', remotePath: '/' } })
+    assert.deepEqual(tested.credentials, { password: 'synthetic-docker-password' })
+    assert.equal(tested.target.context, undefined, 'a hidden context is not sent to an SSH engine')
+    await click(document.querySelector('input[type="radio"][value="light"]'))
+    await input('localPath', 'D:\\shared-demo')
+    await click(button('添加到工作区'))
+    assert.equal(fixture.calls.find(call => call.method === 'add').input.localPath, 'D:\\shared-demo')
+    assert.equal(fixture.calls.find(call => call.method === 'add').input.mode, 'light')
+  } finally { await fixture.dispose() }
+})
+
+test('Skill sync defaults to missing items and requires explicit selection and overwrite for differences', async () => {
+  const row = { id: 'full', workspaceId: 'remote-project', title: 'demo-project', mode: 'full', registered: true, connectionState: 'connected', target: { kind: 'wsl', distribution: 'Ubuntu', remotePath: '/workspace' } }
+  let applied = false
+  const fixture = await mount({ initialSaved: [row], respond(method, payload) {
+    if (method === 'skills/preview') return { ok: true, value: { planId: 'plan', destination: '/home/demo/.dsh/skills', items: [
+      { id: 'missing', name: 'new-skill', description: 'New skill', bytes: 100, files: 1, source: 'user-dsh', state: applied ? 'equal' : 'missing' },
+      { id: 'different', name: 'changed-skill', description: 'Changed skill', bytes: 200, files: 2, source: 'custom', state: applied ? 'equal' : 'different' },
+      { id: 'same', name: 'same-skill', description: 'Same skill', bytes: 100, files: 1, source: 'user-agents', state: 'equal' },
+      { id: 'untouched', name: 'unselected-skill', description: 'Keep local', bytes: 100, files: 1, source: 'user-dsh', state: 'missing' },
+    ] } }
+    if (method === 'skills/apply') { applied = true; return { ok: true, value: { items: payload.selected.map(id => ({ id, name: id, status: id === 'missing' ? 'created' : 'updated' })) } } }
+  } })
+  try {
+    await click(button('远程工作区')); await click(button('同步本机 Skill 到 demo-project'))
+    const boxes = () => [...document.querySelectorAll('.dsh-ssh__skill-list input')]
+    assert.deepEqual(boxes().map(box => box.checked), [true, false, false, true])
+    assert.deepEqual(boxes().map(box => box.disabled), [false, true, true, false])
+    await click(boxes()[3])
+    await click(document.querySelector('.dsh-ssh__sync-overwrite input'))
+    assert.equal(boxes()[1].checked, false, 'permission to overwrite never selects differences automatically')
+    await click(boxes()[1])
+    await click(button('同步所选 2 项'))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'skills/apply').input, { id: 'full', planId: 'plan', selected: ['missing', 'different'], overwrite: true })
+    assert.ok(document.querySelector('[aria-label="同步结果"]'))
+    assert.ok(boxes().every(box => !box.checked), 'recomparison after applying must not select previously unselected missing skills')
+    assert.deepEqual(boxes().map(box => box.disabled), [true, true, true, false])
+    assert.equal(button('同步所选 0 项').disabled, true)
+    await click(button('返回工作区'))
+    assert.ok(document.querySelector('.dsh-ssh__saved'))
+  } finally { await fixture.dispose() }
+})

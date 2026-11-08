@@ -1,8 +1,8 @@
-# DSH SSH / WSL Workspaces
+# DSH SSH / WSL / Docker Workspaces
 
-**把 SSH 服务器和 WSL 里的项目，直接放进 DeepSeek Harness 当前窗口的项目侧栏。**
+**把 SSH 服务器、WSL 和 Docker 容器里的项目，直接放进 DeepSeek Harness 当前窗口的项目侧栏。**
 
-不用为每台机器再打开一个 DSH 窗口。在左侧 **远程工作区** 中添加目录，就能与本机项目一起管理；需要完整的远程开发环境时，还可以让 Agent、终端和任务在远端 DSH 中运行。
+不用为每台机器再打开一个 DSH 窗口。在左侧 **远程工作区** 中添加目录，就能与本机项目一起管理。需要完整的远程开发环境时，让 Agent、终端和任务在远端 DSH 中运行，并按需把本机 Skill 同步过去；希望保留本机 Agent 和模型配置时，可以使用本项目的**轻量模式**。
 
 [npm 安装包](https://www.npmjs.com/package/dsh-ssh-workspaces) · [使用指南](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/usage.md) · [问题反馈](https://github.com/czp0312/dsh-ssh-workspace/issues) · [MIT License](https://github.com/czp0312/dsh-ssh-workspace/blob/main/LICENSE)
 
@@ -14,7 +14,7 @@
 
 ### 远程项目，也在原生侧栏里
 
-- **同一个窗口管理本机、SSH 和 WSL 项目**：使用 DSH 原生工作区和会话列表。
+- **同一个窗口管理本机、SSH、WSL 和 Docker 项目**：使用 DSH 原生工作区和会话列表。
 - **独立的左侧入口**：点击「远程工作区」即可添加、浏览和管理连接。
 - **远程目录浏览**：直接输入项目绝对路径，或浏览目录后添加。
 - **可识别的远程标记**：项目标题旁显示主机图标，悬停可查看目标、连接状态和运行模式。
@@ -23,22 +23,48 @@
 
 ### 轻量、全量两种模式，按项目选择
 
-**轻量模式**适合沿用本机模型配置、主要读写文件和执行远程命令的场景。**全量模式**适合把 Agent、终端和任务都放在服务器或 WSL 里运行的场景。
+**轻量模式是本项目的特色能力**：继续使用本机 Agent、模型配置和 DSH 可见的 Skill，只把文件和项目命令放到远端。**全量模式**适合把 Agent、终端和任务都放在服务器、WSL 或容器里运行的场景。
 
 | 能力 | 轻量模式 | 全量模式 |
 | --- | --- | --- |
 | 远端安装 DSH | 不需要 | 首次连接自动部署 |
 | Agent 和模型配置 | 使用本机 DSH | 使用远端 DSH |
-| 项目文件 | WSL 目录共享 / SSHFS 挂载 | 远端原生文件访问，无需 SSHFS |
+| 项目文件 | WSL 共享、SSHFS 或 Docker 的已有共享/挂载 | 远端原生文件访问，无需 SSHFS |
+| 本机 Skill | 沿用本机 DSH 的技能，脚本仍受远程执行环境限制 | 可勾选同步，比较差异后更新 |
 | 执行命令 | 远程 Bash，每次独立执行 | 远端 DSH 原生工具 |
 | 原生终端、后台任务、PTC、子代理 | 不支持，使用 Native 工具模式 | 接入远端 DSH，具体能力取决于其配置 |
 | WSL 需要 SSH 服务 | 不需要 | 不需要 |
 
 **模式以后也能切换。** 在已保存项目的「连接设置」中重新选择模式，再点击「以该模式连接」。两种模式使用同一个远程目录，分别保留工作区入口和会话历史；切回原模式后，可以继续原来的对话。
 
-切换模式不会迁移旧对话，也不会停止原模式中正在运行的任务。SSH 切回轻量模式时，需要有对应的 SSHFS 挂载。
+切换模式不会迁移旧对话，也不会停止原模式中正在运行的任务。SSH / Docker 切回轻量模式时，需要有对应的共享或挂载路径。
 
 ![在已保存项目的连接设置中选择运行模式，保留原工作区与历史](https://raw.githubusercontent.com/czp0312/dsh-ssh-workspace/main/docs/images/mode-switch.jpg)
+
+### 选择本机 Skill，同步给远端 Agent
+
+在已连接的全量工作区中点击 **同步 Skill**，即可查看本机默认 Agent 预设能发现的用户技能和自定义技能：
+
+- **按需选择**：支持搜索、逐项勾选、选择缺失项和清空选择。
+- **先比较再同步**：显示「远端缺少」「内容不同」「已一致」或不可同步的原因；默认只选中缺失项。
+- **更新需要明确选择**：允许覆盖后，仍需另外勾选内容不同的技能，不会自动选中覆盖。
+- **携带技能资源**：同步指令与技能目录内的脚本、参考资料和资产，保留可执行权限；不复制 `.env`、Git、依赖目录或缓存。
+- **保留远端独有技能**：只写入所选条目。两端内容变化或连接变化后，需要刷新列表，避免覆盖刚修改的内容。
+
+同步到远端用户技能目录，同一远端用户的其他项目也可使用；项目级同名技能仍按 DSH 的优先级生效。脚本需要的 Python 包、可执行程序和系统路径需在远端准备。同步不会把 Windows 程序或本机 MCP 一起搬过去。
+
+![真实 DSH 界面中的 Skill 选择与差异比较](https://raw.githubusercontent.com/czp0312/dsh-ssh-workspace/main/docs/images/skill-sync.jpg)
+
+### Docker 也作为远程项目连接
+
+支持三种入口：**本机 Docker**、已配置的 **Docker Context**，以及 **SSH 服务器上的 Docker**。可读取容器列表、指定容器内用户、浏览项目目录；容器无需单独开放 SSH 端口。
+
+- **全量模式**：通过 `docker exec` 在容器内运行 DSH，使用容器内的文件、终端和任务。
+- **轻量模式**：使用已有 bind mount 或其他双向共享路径访问文件，本机 Agent 通过 `docker exec` 执行项目命令。
+- **稳定的容器身份**：首次连接保存完整容器 ID，名称用于展示。同名容器重建后需要重新添加，旧会话不会悄悄连到另一个容器。
+- **明确的生命周期**：连接已有的运行中容器；不会代替你启动、停止或重建容器。断开全量连接不会停止容器及其中的 DSH。
+
+![真实 DSH 客户端中的 Docker 连接表单](https://raw.githubusercontent.com/czp0312/dsh-ssh-workspace/main/docs/images/docker-connection.jpg)
 
 ### SSH 支持密码、密钥和证书
 
@@ -66,18 +92,18 @@
 
 ## 安装
 
-插件版本 **0.2.6**，已实机验证 **DSH 0.2.2-rc.1**。DSH 仍在快速更新，新版本需要进一步验证；声明的兼容范围不等于所有版本都已测试。
+插件版本 **0.3.0**，已实机验证 **DSH 0.2.2-rc.1**。本版 Skill 同步已通过真实 DSH / WSL 验证；Docker 已完成连接参数、认证、容器身份和界面回归，当前测试环境没有可用的 Docker daemon，尚未完成真实容器验收。DSH 声明的兼容范围不等于所有版本都已测试。
 
 安装到官方桌面客户端的 `desktop` profile：
 
 ```powershell
-dsh plugin --profile desktop add dsh-ssh-workspaces@0.2.6
+dsh plugin --profile desktop add dsh-ssh-workspaces@0.3.0
 ```
 
 使用 `dsh web` 时安装到 `web` profile：
 
 ```sh
-dsh plugin --profile web add dsh-ssh-workspaces@0.2.6
+dsh plugin --profile web add dsh-ssh-workspaces@0.3.0
 ```
 
 **安装后重启客户端或 `dsh web` 一次。** 后续添加和打开远程项目都在原窗口中完成。自定义启动方式请将 profile 名替换为实际使用的名称。
@@ -106,18 +132,27 @@ WSL 中需要 Python 3 和 Bash。全量模式首次连接还需要下载 Node /
 
 **全量模式使用远端自己的模型配置。** 插件不会复制本机 API Key、登录信息或第三方插件。首次使用前，请为远端 DSH 配置可用的模型提供方，详见[全量模式准备](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/usage.md#全量模式准备)。
 
+### 添加 Docker 项目
+
+1. 点击 **远程工作区 → DOCKER**，选择 Docker 所在位置。
+2. 本机 / Context 方式可填写已有 Context 名称；SSH 方式填写宿主机的登录信息。
+3. 点击「读取容器」，选择运行中的容器，或直接填写名称 / ID。
+4. 填写容器内项目目录，按需指定容器内用户。
+5. 选择运行模式。轻量模式填写已与容器目录双向共享的本机路径；全量模式无需挂载。
+6. 测试并添加。连接全量项目后，可从卡片的「同步 Skill」选择本机技能。
+
 ## 使用前了解
 
-- **当前主要面向 Windows 桌面客户端和 Linux / WSL 远端。** 全量后端要求 Linux；自动安装 Node 支持 x64 / arm64。macOS / Linux 本机的轻量 SSH 挂载路径支持尚未实机验证。
+- **当前主要面向 Windows 桌面客户端和 Linux / WSL / Linux 容器远端。** 全量后端要求 glibc Linux；自动安装 Node 支持 x64 / arm64。Alpine / musl 容器可考虑有共享路径的轻量模式。macOS / Linux 本机尚未实机验证。
 - **轻量 SSH 的挂载必须真实存在。** 普通本机文件夹不是 SSHFS 挂载；指定密码、密钥或证书时，需先用同一凭据建立挂载。
-- **全量部署不需要 root。** DSH 安装在远端用户目录，服务只监听远端 `127.0.0.1`，经 SSH / WSL 通道连接。
+- **全量部署不需要 root。** DSH 安装在远端用户目录，服务只监听其 `127.0.0.1`，经 SSH、WSL 或 Docker exec 通道连接。
 - **首次 SSH 指纹核对在终端完成。** 插件遵循严格主机密钥校验，不会跳过未知或变更的主机指纹。
 
-详细的认证、挂载、模型配置、模式切换和故障处理见[使用指南](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/usage.md)。
+详细的认证、Docker 环境、Skill 同步和故障处理见[使用指南](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/usage.md)。与 ZCode 的能力对应关系及当前边界见[远程能力对照](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/remote-capabilities.md)。
 
 ## 开发与反馈
 
-欢迎通过 [GitHub Issues](https://github.com/czp0312/dsh-ssh-workspace/issues) 反馈问题。请说明插件版本、DSH 版本、操作系统、SSH / WSL、运行模式和复现步骤；日志与截图中请先移除凭据及私人项目内容。
+欢迎通过 [GitHub Issues](https://github.com/czp0312/dsh-ssh-workspace/issues) 反馈问题。请说明插件版本、DSH 版本、操作系统、连接方式（SSH / WSL / Docker）、运行模式和复现步骤；日志与截图中请先移除凭据及私人项目内容。
 
 源码构建、验证和实现说明见[开发指南](https://github.com/czp0312/dsh-ssh-workspace/blob/main/docs/development.md)。参与维护请阅读 [AGENTS.md](https://github.com/czp0312/dsh-ssh-workspace/blob/main/AGENTS.md)，功能变更应同步更新使用文档和截图。
 

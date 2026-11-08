@@ -64,6 +64,27 @@ span.dsh-ssh-project-label { flex-direction: row; align-items: center; gap: 5px;
 .dsh-ssh__notice { flex: none; margin: 12px 24px 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--dsh-ssh-success) 25%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--dsh-ssh-success) 7%, transparent); color: var(--dsh-ssh-success); overflow-wrap: anywhere; }
 .dsh-ssh__notice:empty { display: none; }
 .dsh-ssh__body { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr); min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.dsh-ssh__body--skills { display: block; }
+.dsh-ssh__skills { max-width: 900px; padding: 24px; margin: 0 auto; }
+.dsh-ssh__skills > * + * { margin-top: 14px; }
+.dsh-ssh__sync-overwrite { display: flex; gap: 9px; align-items: flex-start; color: var(--dsh-ssh-muted); }
+.dsh-ssh__sync-overwrite input, .dsh-ssh__skill-list input { flex: none; accent-color: var(--dsh-ssh-accent); margin: 4px 0 0; }
+.dsh-ssh__skill-list { display: grid; gap: 10px; list-style: none; padding: 0; }
+.dsh-ssh__skill-list > li { border: 1px solid var(--dsh-ssh-border); border-radius: 10px; padding: 14px; }
+.dsh-ssh__skill-list > li:has(input:checked) { border-color: var(--dsh-ssh-accent); background: color-mix(in srgb, var(--dsh-ssh-accent) 5%, transparent); }
+.dsh-ssh__skill-list label { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
+.dsh-ssh__skill-list label > span { min-width: 0; flex: 1; }
+.dsh-ssh__skill-list p { margin-top: 5px; color: var(--dsh-ssh-muted); }
+.dsh-ssh__skill-list small, .dsh-ssh__skill-list code { display: block; margin-top: 5px; color: var(--dsh-ssh-muted); overflow-wrap: anywhere; font-size: 11px; }
+.dsh-ssh__skill-state { display: inline-block; margin-left: 12px; padding: 1px 7px; border-radius: 5px; background: var(--dsh-ssh-soft); font-size: 11px; }
+.dsh-ssh__skill-list [data-state="missing"] .dsh-ssh__skill-state { color: var(--dsh-ssh-success); }
+.dsh-ssh__skill-list [data-state="different"] .dsh-ssh__skill-state { color: var(--dsh-ssh-accent); }
+.dsh-ssh__sync-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 0; background: var(--dsh-ssh-bg); border-top: 1px solid var(--dsh-ssh-border); }
+.dsh-ssh__sync-footer .dsh-ssh__hint { display: block; margin-top: 4px; }
+.dsh-ssh__sync-results { list-style: none; padding: 12px; border-radius: 8px; background: var(--dsh-ssh-soft); color: var(--dsh-ssh-success); }
+.dsh-ssh__sync-results [data-result="failed"] { color: var(--dsh-ssh-danger); }
+.dsh-ssh__container-list { max-height: 160px; overflow: auto; padding: 4px 8px; margin: 0; list-style: none; background: var(--dsh-ssh-soft); border-radius: 8px; }
+.dsh-ssh__container-list button { text-align: left; overflow-wrap: anywhere; }
 .dsh-ssh__new { min-width: 0; padding: 22px 24px 24px; }
 .dsh-ssh__new > h3, .dsh-ssh__section-head h3 { font-size: 13px; font-weight: 650; }
 .dsh-ssh__tabs { display: flex; gap: 4px; margin: 14px 0 12px; padding: 4px; border-radius: 10px; background: var(--dsh-ssh-soft); }

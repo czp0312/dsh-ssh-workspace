@@ -4,7 +4,7 @@ import { join, posix } from 'node:path'
 import { validateAddRequest, targetKey, wslUncPath, sshfsUncPath, toRemotePath } from './model.js'
 import { WorkspaceStore } from './storage.js'
 import type { RemoteTransport } from './transport.js'
-import type { SavedWorkspace, WorkspaceView, RemoteTarget, RemoteInfo, ConnectionHealth, CommandResult, RunOptions } from './types.js'
+import { targetLabel, type SavedWorkspace, type WorkspaceView, type RemoteTarget, type RemoteInfo, type ConnectionHealth, type CommandResult, type RunOptions } from './types.js'
 
 export interface NativeWorkspace {
   readonly id: string
@@ -19,7 +19,7 @@ export interface NativeWorkspaceRegistry {
   delete(id: string): Promise<boolean>
 }
 
-export type WorkspaceTransport = Pick<RemoteTransport, 'inspect' | 'createMountProbe' | 'removeMountProbe'> & Partial<Pick<RemoteTransport, 'run'>>
+export type WorkspaceTransport = Pick<RemoteTransport, 'inspect' | 'createMountProbe' | 'removeMountProbe'> & Partial<Pick<RemoteTransport, 'run' | 'canonicalTarget'>>
 
 /** Windows network-filesystem IO cannot be cancelled, but must not block disconnect. */
 function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -68,8 +68,9 @@ export class WorkspaceManager {
     const request = validateAddRequest(input)
     return this.enqueue(async () => {
       signal?.throwIfAborted()
-      const info = await this.transport.inspect(request.target, signal)
-      const target: RemoteTarget = { ...request.target, remotePath: info.path }
+      const canonical = await this.transport.canonicalTarget?.(request.target, signal) ?? request.target
+      const info = await this.transport.inspect(canonical, signal)
+      const target: RemoteTarget = { ...canonical, remotePath: info.path }
       const existing = this.store.list().find(row => targetKey(row.target) === targetKey(target))
       if (existing !== undefined) return this.connectTracked(existing, signal)
       const localPath = await this.localDirectory(target, info, request.localPath, signal)
@@ -80,7 +81,7 @@ export class WorkspaceManager {
         throw new Error('这个目录已作为本机项目存在。请先在侧边栏移除它的项目登记，再添加远程项目；文件和会话会保留。')
       }
       signal?.throwIfAborted()
-      const title = request.title?.trim() || `${posix.basename(target.remotePath) || '/'} · ${target.kind === 'wsl' ? target.distribution : target.host}`
+      const title = request.title?.trim() || `${posix.basename(target.remotePath) || '/'} · ${targetLabel(target)}`
       const workspace = await this.registry.create(localPath, title)
       const record: SavedWorkspace = {
         id: randomUUID(), workspaceId: workspace.id, title: workspace.title,
@@ -224,22 +225,24 @@ export class WorkspaceManager {
       requested = wslUncPath(target)
     } else if (provided !== undefined) {
       requested = provided
-    } else {
+    } else if (target.kind === 'ssh') {
       if (this.platform !== 'win32') throw new Error('请先用 SSHFS 挂载远程目录，并填写本机挂载路径。')
       requested = sshfsUncPath(target, info.user)
+    } else {
+      throw new Error('Docker 轻量模式需要填写本机共享/挂载路径，且必须对应容器内的同一项目目录；也可选择无需挂载的全量模式。')
     }
     let canonical: string
     try {
       canonical = await abortable(realpath(requested), signal)
       if (!(await abortable(stat(canonical), signal)).isDirectory()) throw new Error('挂载目标不是目录')
     } catch (error) {
-      const advice = target.kind === 'ssh'
+      const advice = target.kind === 'docker' ? '请确认共享或挂载路径可访问，并与容器目录双向共享。' : target.kind === 'ssh'
         ? '请安装 WinFsp 与 SSHFS-Win，配置密钥登录，或填写已有的 SSHFS 挂载目录。'
         : '请确认发行版已启动，且 Windows 能访问该 WSL 目录。'
       throw new Error(`无法访问本机目录 ${requested}。${advice}`, { cause: error })
     }
     signal?.throwIfAborted()
-    if (target.kind === 'ssh') {
+    if (target.kind !== 'wsl') {
       // A two-way proof catches a wrong mount before either filesystem or Bash is bound.
       const probe = await this.transport.createMountProbe(target, signal)
       try {
@@ -248,7 +251,7 @@ export class WorkspaceManager {
         if (observed !== probe.token) throw new Error('挂载内容不匹配')
         signal?.throwIfAborted()
       } catch (error) {
-        throw new Error('本机挂载目录与 SSH 远程目录不一致，无法添加项目。', { cause: error })
+        throw new Error('本机挂载目录与远程目录不一致，无法添加项目。', { cause: error })
       } finally {
         await this.transport.removeMountProbe(target, probe.name, probe.token, AbortSignal.timeout(5_000))
       }
