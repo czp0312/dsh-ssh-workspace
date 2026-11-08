@@ -4,8 +4,23 @@
   "description": "SSH and WSL projects in the native DeepSeek Harness sidebar, in the current window",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/czp0312/dsh-ssh-workspace.git"
+  },
+  "homepage": "https://github.com/czp0312/dsh-ssh-workspace#readme",
+  "bugs": {
+    "url": "https://github.com/czp0312/dsh-ssh-workspace/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "main": "lib/index.js",
   "types": "lib/types/src/index.d.ts",
+  "bin": {
+    "dsh-ssh-askpass": "lib/ssh-askpass.cjs"
+  },
   "exports": {
     ".": {
       "types": "./lib/types/src/index.d.ts",

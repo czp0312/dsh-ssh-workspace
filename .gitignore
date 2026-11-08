@@ -17,6 +17,7 @@ coverage/
 .dsh/
 
 # Environment files, SSH credentials and local connection state
+.npmrc
 .env
 .env.*
 !.env.example

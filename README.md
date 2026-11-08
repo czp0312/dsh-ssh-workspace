@@ -23,13 +23,23 @@ SSH 和 WSL 的连接表单均支持切换模式，每个连接类型分别保�
 
 当前已验证 **DSH 0.2.2-rc.1**，安装包为 `dsh-ssh-workspaces@0.2.5`。本项目使用该版本的原生 Client Module、Connection RPC、Remote Mux 和 Sidebar Panel 接口。远端 DSH 固定安装同一协议版本。未来 DSH 版本需要重新验证，不能仅凭版本范围视为兼容。
 
+从 npm 安装到桌面版的 `desktop` profile：
+
+```powershell
+dsh plugin --profile desktop add dsh-ssh-workspaces@0.2.5
+```
+
+若尚未注册 `dsh` 命令，可在 DSH 的“应用 → 管理 dsh 命令”中配置，或使用安装目录内 `resources/runtime/cli/bin/dsh.cmd` 的完整路径。
+
+从源码构建本地安装包：
+
 ```powershell
 npm ci
 npm run check
 npm pack
 ```
 
-桌面版通过官方 CLI 安装到 `desktop` profile：
+通过官方 CLI 安装刚构建的本地包：
 
 ```powershell
 & 'E:\Program\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'D:\Code\Workspace\dsh-ssh\dsh-ssh-workspaces-0.2.5.tgz'
