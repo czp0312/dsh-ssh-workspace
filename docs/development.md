@@ -17,7 +17,7 @@ npm pack
 从仓库根目录把本地包安装到测试 profile：
 
 ```sh
-dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.3.3.tgz
+dsh plugin --profile your-test-profile add ./dsh-ssh-workspaces-0.4.0.tgz
 ```
 
 测试前应通过独立 `DSH_HOME` 配置隔离数据目录，并启动同名 profile。不要直接修改正在使用的桌面 profile 来做安装试验。

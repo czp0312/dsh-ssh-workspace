@@ -160,6 +160,28 @@ span.dsh-ssh-project-label { flex-direction: row; align-items: center; gap: 5px;
 .dsh-ssh__success { border: 1px solid color-mix(in srgb, var(--dsh-ssh-success) 22%, transparent); background: color-mix(in srgb, var(--dsh-ssh-success) 7%, transparent); color: var(--dsh-ssh-success); }
 .dsh-ssh__tested-path { display: block; margin-top: 3px; font-family: ui-monospace, monospace; font-size: 11px; }
 .dsh-ssh__error { margin: 10px 0 !important; border: 1px solid color-mix(in srgb, var(--dsh-ssh-danger) 25%, transparent); background: color-mix(in srgb, var(--dsh-ssh-danger) 7%, transparent); color: var(--dsh-ssh-danger); }
+
+.dsh-ssh__hostkey { display: grid; gap: 10px; margin: 10px 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--dsh-ssh-warning) 38%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--dsh-ssh-warning) 6%, transparent); }
+.dsh-ssh__hostkey[data-state="changed"] { border-color: color-mix(in srgb, var(--dsh-ssh-danger) 38%, transparent); background: color-mix(in srgb, var(--dsh-ssh-danger) 6%, transparent); }
+.dsh-ssh__hostkey-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dsh-ssh__hostkey-head strong { font-size: 13px; font-weight: 650; }
+.dsh-ssh__hostkey-target { display: block; margin-top: 2px; color: var(--dsh-ssh-muted); font-size: 11px; }
+.dsh-ssh__hostkey-target code { color: var(--dsh-ssh-fg); font-size: 11px; }
+.dsh-ssh__hostkey-status { color: var(--dsh-ssh-muted); font-size: 11px; line-height: 1.65; }
+.dsh-ssh__hostkey-list, .dsh-ssh__hostkey-conflicts { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.dsh-ssh__hostkey-list > li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; padding: 7px 9px; border: 1px solid var(--dsh-ssh-border); border-radius: 8px; background: var(--dsh-ssh-bg); }
+.dsh-ssh__hostkey-type { flex: none; color: var(--dsh-ssh-muted); font-size: 10.5px; letter-spacing: .02em; }
+.dsh-ssh__fingerprint { min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
+.dsh-ssh__hostkey-tag { flex: none; margin-left: auto; padding: 1px 6px; border-radius: 5px; background: var(--dsh-ssh-soft); color: var(--dsh-ssh-muted); font-size: 10px; }
+.dsh-ssh__hostkey-tag[data-trusted="true"] { background: color-mix(in srgb, var(--dsh-ssh-success) 9%, transparent); color: var(--dsh-ssh-success); }
+.dsh-ssh__hostkey-tag[data-trusted="false"] { background: color-mix(in srgb, var(--dsh-ssh-warning) 10%, transparent); color: var(--dsh-ssh-warning); }
+.dsh-ssh__hostkey-warning { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--dsh-ssh-danger) 30%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--dsh-ssh-danger) 6%, transparent); }
+.dsh-ssh__hostkey-warning > strong { color: var(--dsh-ssh-danger); font-size: 12px; }
+.dsh-ssh__hostkey-warning p { color: var(--dsh-ssh-muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.dsh-ssh__hostkey-warning code { overflow-wrap: anywhere; }
+.dsh-ssh__hostkey-conflicts > li { display: grid; gap: 2px; }
+.dsh-ssh__hostkey-conflicts code { color: var(--dsh-ssh-fg); font-size: 11px; }
+.dsh-ssh__hostkey-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .dsh-ssh__form-footer { position: sticky; bottom: -24px; z-index: 4; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 16px -24px -24px; padding: 14px 24px; border-top: 1px solid var(--dsh-ssh-border); background: var(--dsh-ssh-bg); }
 .dsh-ssh__form-footer p { max-width: 640px; color: var(--dsh-ssh-muted); font-size: 11px; line-height: 1.6; }
 .dsh-ssh__form-footer > button { flex: none; }

@@ -122,6 +122,41 @@ export interface WorkspaceView extends SavedWorkspace {
   sharedConnectionCount?: number
 }
 
+/** One host key the remote server presents, as OpenSSH reports it. */
+export interface HostKeyEntry {
+  /** OpenSSH key type, for example `ssh-ed25519`. */
+  type: string
+  /** OpenSSH SHA256 fingerprint, for example `SHA256:...`. */
+  fingerprint: string
+  /** Already present in the known-hosts file used by the plugin. */
+  trusted: boolean
+}
+
+/** A host key that contradicts an existing known-hosts record; never replaced automatically. */
+export interface HostKeyConflict {
+  type: string
+  /** Fingerprint the server presents now. */
+  fingerprint: string
+  /** Fingerprint of the existing record, or `@revoked` when that key is revoked. */
+  existing: string
+}
+
+export interface HostKeyInspection {
+  /** Address the SSH client actually contacts after resolving its configuration. */
+  host: string
+  port: number
+  knownHostsFile: string
+  /** unknown: no record for this host; partial: some scanned types are not trusted yet. */
+  state: 'unknown' | 'partial' | 'known' | 'changed'
+  entries: HostKeyEntry[]
+  conflicts: HostKeyConflict[]
+}
+
+export interface HostKeyTrustResult {
+  knownHostsFile: string
+  added: { type: string; fingerprint: string }[]
+}
+
 export interface RemoteInfo {
   path: string
   home: string
@@ -159,6 +194,6 @@ export interface PluginConfig {
   dockerExecutable?: string
   pythonExecutable?: string
   connectTimeoutMs?: number
-  /** Optional separate host-key store, primarily for isolated integration tests. */
+  /** Host-key store; defaults to the user's OpenSSH known_hosts file. */
   knownHostsFile?: string
 }

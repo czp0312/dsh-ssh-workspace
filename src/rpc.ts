@@ -19,8 +19,16 @@ export function managementFetch(endpoint: string, dispatch: ManagementHandler): 
   }
 }
 
+/** Every management endpoint the plugin dispatches; keep this in sync with `index.ts`. */
+export const MANAGEMENT_ENDPOINTS = [
+  'status', 'wsl/list', 'docker/list', 'skills/preview', 'skills/apply',
+  'test', 'hostkey/inspect', 'hostkey/trust', 'browse',
+  'add', 'reconnect', 'connection/reconnect', 'disconnect', 'remove',
+  'backend/rpc', 'backend/open', 'backend/poll', 'backend/send', 'backend/cancel',
+] as const
+
 export function registerManagementRoutes(ctx: Context, dispatch: ManagementHandler): void {
-  for (const endpoint of ['status', 'wsl/list', 'docker/list', 'skills/preview', 'skills/apply', 'test', 'browse', 'add', 'reconnect', 'connection/reconnect', 'disconnect', 'remove', 'backend/rpc', 'backend/open', 'backend/poll', 'backend/send', 'backend/cancel']) {
+  for (const endpoint of MANAGEMENT_ENDPOINTS) {
     const unregister = ctx.connection.fetch.register({
       path: `${RPC_CHANNEL}/${RPC_PREFIX}/${endpoint}`, methods: ['POST'], requestBody: 'buffered',
       fetch: managementFetch(endpoint, dispatch),

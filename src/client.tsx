@@ -3,14 +3,24 @@ import stylesheet from './client.css'
 import { installBackendRouter } from './client-router.js'
 import { installWorkspaceBadges } from './workspace-badges.js'
 import { connectionState, CONNECTION_LABELS } from './connection-status.js'
-import { PLUGIN_VERSION, RPC_CHANNEL, RPC_PREFIX, sshTarget, targetLabel, type DockerHost, type DockerContainer, type AddWorkspaceRequest, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type ReconnectRequest, type SavedWorkspace, type WorkspaceView, type WorkspaceMode, type SshCredentials } from './types.js'
+import { classifyHostKeyFailure, isHostKeyFingerprint } from './host-key.js'
+import { PLUGIN_VERSION, RPC_CHANNEL, RPC_PREFIX, sshTarget, targetLabel, type DockerHost, type DockerContainer, type AddWorkspaceRequest, type HostKeyInspection, type HostKeyTrustResult, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type ReconnectRequest, type SavedWorkspace, type WorkspaceView, type WorkspaceMode, type SshCredentials } from './types.js'
 import { aggregateState, backendState, connectionLabel, environmentLabel, environmentDetail, groupWorkspaces, type ConnectionGroup, type EnvironmentGroup } from './workspace-groups.js'
 import type { SkillSyncPreview, SkillSyncResult } from './skills-types.js'
 
 type Disposer = () => void
 type Kind = RemoteTarget['kind']
-type Area = 'status' | 'distros' | 'form' | 'connections' | 'docker' | 'skills'
+type Area = 'status' | 'distros' | 'form' | 'connections' | 'docker' | 'skills' | 'hostkey'
+type HostKeyArea = 'form' | 'connections'
 type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { message: string } }
+
+/** A failed action waiting for explicit host-key confirmation; retry repeats that exact action once. */
+interface HostKeyFlow {
+  area: HostKeyArea
+  target: RemoteTarget
+  retry: () => void
+  inspection: HostKeyInspection | null
+}
 
 interface HostStatus {
   pluginVersion: string
@@ -30,6 +40,8 @@ interface Endpoints {
   add: { input: AddWorkspaceRequest; output: SavedWorkspace }
   reconnect: { input: ReconnectRequest; output: SavedWorkspace }
   'connection/reconnect': { input: { id: string; force?: boolean; credentials?: SshCredentials }; output: void }
+  'hostkey/inspect': { input: { target: RemoteTarget }; output: HostKeyInspection }
+  'hostkey/trust': { input: { target: RemoteTarget; fingerprints: string[] }; output: HostKeyTrustResult }
   disconnect: { input: { id: string }; output: void }
   remove: { input: { id: string }; output: void }
 }
@@ -92,6 +104,7 @@ interface Snapshot {
   notice: string | null
   confirmRemove: string | null
   reauth: { id: string; mode: WorkspaceMode; localPath: string; password: string; passphrase: string; connection?: boolean; force?: boolean } | null
+  hostKey: HostKeyFlow | null
 }
 
 const emptyDraft = (): Draft => ({ mode: 'full', title: '', host: '', port: '', user: '', sshAuth: 'auto', identityFile: '', certificateFile: '', password: '', passphrase: '', distribution: '', dockerLocation: 'local', context: '', container: '', dockerUser: '', remotePath: '/', localPath: '' })
@@ -105,8 +118,8 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
   let state: Snapshot = {
     open: false, view: 'add', tab: 'ssh', drafts: { ssh: emptyDraft(), wsl: emptyDraft(), docker: emptyDraft() },
     status: null, distros: [], distrosLoaded: false, containers: [], skills: null, directory: null, info: null,
-    pending: [], errors: { status: null, distros: null, form: null, connections: null, docker: null, skills: null },
-    notice: null, confirmRemove: null, reauth: null,
+    pending: [], errors: { status: null, distros: null, form: null, connections: null, docker: null, skills: null, hostkey: null },
+    notice: null, confirmRemove: null, reauth: null, hostKey: null,
   }
   let alive = true
   let opener: HTMLElement | null = null
@@ -125,7 +138,10 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     request?.abort()
     update({ pending: [...requests.keys()] })
   }
-  const cancelForm = (): void => { cancel('browse'); cancel('test'); cancel('docker/list') }
+  const cancelForm = (): void => {
+    cancel('browse'); cancel('test'); cancel('docker/list'); cancel('hostkey/inspect'); cancel('hostkey/trust')
+    if (state.hostKey || state.errors.hostkey) update({ hostKey: null, errors: { ...state.errors, hostkey: null } })
+  }
   const patchDraft = (kind: Kind, patch: Partial<Draft>): void => update({ drafts: { ...state.drafts, [kind]: { ...state.drafts[kind], ...patch } } })
 
   async function request<K extends keyof Endpoints>(
@@ -210,6 +226,7 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     refresh()
   }
   const editConnection = (id: string | null, connection = false, force = false): void => {
+    clearHostKey()
     const record = state.status?.workspaces.find(row => row.id === id)
     update({ reauth: record ? { id: record.id, mode: record.mode ?? 'light', localPath: record.mode === 'full' ? '' : record.localPath, password: '', passphrase: '', connection, force } : null })
   }
@@ -220,6 +237,100 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
       if (state.skills?.id !== id) return
       update({ skills: { ...state.skills, preview, selected: result ? [] : preview.items.filter(row => row.state === 'missing').map(row => row.id) } })
     })
+  }
+
+  /** Drop an open verification panel and its requests; the original error message stays visible. */
+  const clearHostKey = (): void => {
+    cancel('hostkey/inspect')
+    cancel('hostkey/trust')
+    if (state.hostKey || state.errors.hostkey) update({ hostKey: null, errors: { ...state.errors, hostkey: null } })
+  }
+  const inspectHostKey = (area: HostKeyArea, target: RemoteTarget, retry: () => void): void => {
+    cancel('hostkey/trust')
+    update({ hostKey: { area, target, retry, inspection: null }, errors: { ...state.errors, hostkey: null } })
+    // The server resolved the same target moments ago; send only the target, never credentials.
+    void request('hostkey/inspect', 'hostkey/inspect', { target }, 'hostkey', inspection => {
+      const flow = state.hostKey
+      if (!flow || flow.target !== target) return
+      update({ hostKey: { ...flow, inspection } })
+    })
+  }
+  /** Only a genuine OpenSSH host-key failure opens the panel; every other error keeps its own message. */
+  const inspectOnHostKeyFailure = (area: HostKeyArea, target: RemoteTarget, retry: () => void, message: string): void => {
+    if (!classifyHostKeyFailure(message)) return
+    inspectHostKey(area, target, retry)
+  }
+
+  function test(): void {
+    if (mutationPending(state)) return
+    cancelForm()
+    const target = targetOf()
+    if (!target) return
+    void request('test', 'test', { target, ...credentialsOf() }, 'form', info => update({ info }), message => inspectOnHostKeyFailure('form', target, test, message))
+  }
+  function add(): void {
+    if (mutationPending(state)) return
+    const target = targetOf()
+    if (!target) return
+    const draft = state.drafts[state.tab]
+    const localPath = draft.localPath.trim()
+    cancelForm()
+    const title = draft.title.trim()
+    update({ notice: null })
+    void request('add', 'add', { target, mode: draft.mode, ...credentialsOf(), ...(title ? { title } : {}), ...(draft.mode === 'light' && target.kind !== 'wsl' && localPath ? { localPath } : {}) }, 'form', saved => {
+      remember(saved)
+      patchDraft('ssh', { password: '', passphrase: '' })
+      patchDraft('docker', { password: '', passphrase: '' })
+      update({ view: 'projects', notice: `已添加「${saved.title}」。项目已登记到侧栏，点击“打开项目”开始工作。` })
+    }, message => inspectOnHostKeyFailure('form', target, add, message))
+  }
+  function reconnect(id: string): void {
+    if (mutationPending(state)) return
+    const target = state.status?.workspaces.find(row => row.id === id)?.target
+    cancelForm()
+    update({ notice: null, confirmRemove: null })
+    void request(`reconnect:${id}`, 'reconnect', { id }, 'connections', saved => {
+      remember(saved)
+      update({ notice: `「${saved.title}」已重新连接。` })
+    }, message => {
+      refresh()
+      if (/SSH 密码|口令|认证失败|Permission denied/i.test(message)) editConnection(id)
+      if (target) inspectOnHostKeyFailure('connections', target, () => reconnect(id), message)
+    })
+  }
+  function reconnectBackend(id: string, force = false): void {
+    if (mutationPending(state)) return
+    const target = state.status?.workspaces.find(row => row.id === id)?.target
+    cancel('status'); cancelForm()
+    update({ notice: null, reauth: null, confirmRemove: null })
+    void request(`reconnect:${id}`, 'connection/reconnect', { id, ...(force ? { force } : {}) }, 'connections', () => {
+      onChanged(); refresh()
+      update({ notice: '全量后端已连接，共享此连接的项目已刷新；未登记目录需单独恢复。' })
+    }, message => {
+      refresh()
+      if (/SSH 密码|口令|认证失败|Permission denied/i.test(message)) editConnection(id, true, force)
+      if (target) inspectOnHostKeyFailure('connections', target, () => reconnectBackend(id, force), message)
+    })
+  }
+  function reconnectWithCredentials(): void {
+    const form = state.reauth
+    if (!form || mutationPending(state)) return
+    const original = state.status?.workspaces.find(row => row.id === form.id)
+    if (!original) return
+    const switching = form.mode !== (original.mode ?? 'light')
+    if (!form.connection && original.mode === 'full' && !switching) return
+    const credentials = { ...(form.password ? { password: form.password } : {}), ...(form.passphrase ? { passphrase: form.passphrase } : {}) }
+    clearHostKey()
+    const inspect = (message: string): void => inspectOnHostKeyFailure('connections', original.target, () => reconnectWithCredentials(), message)
+    if (form.connection) {
+      void request(`reconnect:${form.id}`, 'connection/reconnect', { id: form.id, ...(form.force ? { force: true } : {}), ...(Object.keys(credentials).length ? { credentials } : {}) }, 'connections', () => {
+        onChanged(); refresh(); update({ reauth: null, notice: '全量后端已连接，共享此连接的项目已刷新。' })
+      }, message => { refresh(); inspect(message) })
+      return
+    }
+    void request(`${switching ? 'switch' : 'reconnect'}:${form.id}`, 'reconnect', { id: form.id, ...(Object.keys(credentials).length ? { credentials } : {}), ...(switching ? { mode: form.mode, ...(form.mode === 'light' && form.localPath.trim() ? { localPath: form.localPath.trim() } : {}) } : {}) }, 'connections', saved => {
+      remember(saved); update({ reauth: null, notice: switching ? `已连接${form.mode === 'full' ? '全量' : '轻量'}模式。原模式入口与会话历史保留，可分别继续使用。` : `「${saved.title}」已重新连接。` })
+    }, message => { refresh(); inspect(message) })
   }
 
   return {
@@ -266,14 +377,14 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
       requests.clear()
       patchDraft('ssh', { password: '', passphrase: '' })
       patchDraft('docker', { password: '', passphrase: '' })
-      update({ open: false, pending: [], confirmRemove: null, reauth: null, skills: null })
+      update({ open: false, pending: [], confirmRemove: null, reauth: null, skills: null, hostKey: null, errors: { ...state.errors, hostkey: null } })
       const returnTo = opener
       queueMicrotask(() => { if (!state.open && returnTo?.isConnected) returnTo.focus() })
     },
     setTab: (tab: Kind): void => {
       if (tab === state.tab || mutationPending(state)) return
       cancelForm()
-      update({ tab, directory: null, info: null, errors: { ...state.errors, form: null, docker: null } })
+      update({ tab, directory: null, info: null, hostKey: null, errors: { ...state.errors, form: null, docker: null, hostkey: null } })
       if (tab === 'wsl' && !state.distrosLoaded) loadDistros()
     },
     setMode: (mode: WorkspaceMode): void => {
@@ -305,6 +416,7 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
     closeSkills: (): void => { if (state.pending.includes('skills/apply')) return; cancel('skills/preview'); update({ skills: null }); setError('skills', null) },
     escape: (): boolean => {
       if (state.confirmRemove) { update({ confirmRemove: null }); return true }
+      if (state.hostKey) { if (!state.pending.includes('hostkey/trust')) clearHostKey(); return true }
       if (state.reauth) { if (!mutationPending(state)) update({ reauth: null }); return true }
       if (state.skills) {
         if (state.pending.includes('skills/apply')) return true
@@ -352,71 +464,34 @@ function createManager(ctx: ClientContext, onChanged: () => void = () => {}, onS
         update({ directory, info: null })
       })
     },
-    test: (): void => {
-      if (mutationPending(state)) return
-      cancelForm()
-      const target = targetOf()
-      if (!target) return
-      void request('test', 'test', { target, ...credentialsOf() }, 'form', info => update({ info }))
-    },
-    add: (): void => {
-      if (mutationPending(state)) return
-      const target = targetOf()
-      if (!target) return
-      const draft = state.drafts[state.tab]
-      const localPath = draft.localPath.trim()
-      cancelForm()
-      const title = draft.title.trim()
-      update({ notice: null })
-      void request('add', 'add', { target, mode: draft.mode, ...credentialsOf(), ...(title ? { title } : {}), ...(draft.mode === 'light' && target.kind !== 'wsl' && localPath ? { localPath } : {}) }, 'form', saved => {
-        remember(saved)
-        patchDraft('ssh', { password: '', passphrase: '' })
-        patchDraft('docker', { password: '', passphrase: '' })
-        update({ view: 'projects', notice: `已添加「${saved.title}」。项目已登记到侧栏，点击“打开项目”开始工作。` })
-      })
-    },
-    reconnect: (id: string): void => {
-      if (mutationPending(state)) return
-      cancelForm()
-      update({ notice: null, confirmRemove: null })
-      void request(`reconnect:${id}`, 'reconnect', { id }, 'connections', saved => {
-        remember(saved)
-        update({ notice: `「${saved.title}」已重新连接。` })
-      }, message => { refresh(); if (/SSH 密码|口令|认证失败|Permission denied/i.test(message)) editConnection(id) })
-    },
+    test,
+    add,
+    reconnect,
     editCredentials: editConnection,
     editConnection,
-    reconnectBackend: (id: string, force = false): void => {
-      if (mutationPending(state)) return
-      cancel('status'); cancelForm()
-      update({ notice: null, reauth: null, confirmRemove: null })
-      void request(`reconnect:${id}`, 'connection/reconnect', { id, ...(force ? { force } : {}) }, 'connections', () => {
-        onChanged(); refresh()
-        update({ notice: '全量后端已连接，共享此连接的项目已刷新；未登记目录需单独恢复。' })
-      }, message => { refresh(); if (/SSH 密码|口令|认证失败|Permission denied/i.test(message)) editConnection(id, true, force) })
+    reconnectBackend,
+    reconnectWithCredentials,
+    dismissHostKey: (): void => { if (state.pending.includes('hostkey/trust')) return; clearHostKey() },
+    trustHostKeys: (): void => {
+      const flow = state.hostKey
+      const inspection = flow?.inspection
+      if (!flow || !inspection || state.pending.includes('hostkey/trust')) return
+      if (inspection.state !== 'unknown' && inspection.state !== 'partial') return
+      const untrusted = inspection.entries.filter(entry => !entry.trusted)
+      const fingerprints = [...new Set(untrusted.map(entry => entry.fingerprint))]
+      if (!fingerprints.length || !fingerprints.every(isHostKeyFingerprint)) return
+      cancel('hostkey/inspect')
+      // Trust the scanned keys, then repeat the failed action exactly once.
+      void request('hostkey/trust', 'hostkey/trust', { target: flow.target, fingerprints }, 'hostkey', () => {
+        const retry = flow.retry
+        update({ hostKey: null, errors: { ...state.errors, hostkey: null } })
+        retry()
+      })
     },
     changeCredential: (field: 'password' | 'passphrase', value: string): void => { if (state.reauth && !mutationPending(state)) update({ reauth: { ...state.reauth, [field]: value } }) },
     changeConnection: (field: 'mode' | 'localPath', value: string): void => {
       if (!state.reauth || mutationPending(state) || (field === 'mode' && value !== 'light' && value !== 'full')) return
       update({ reauth: { ...state.reauth, [field]: value } })
-    },
-    reconnectWithCredentials: (): void => {
-      const form = state.reauth
-      if (!form || mutationPending(state)) return
-      const original = state.status?.workspaces.find(row => row.id === form.id)
-      if (!original) return
-      const switching = form.mode !== (original.mode ?? 'light')
-      if (!form.connection && original.mode === 'full' && !switching) return
-      const credentials = { ...(form.password ? { password: form.password } : {}), ...(form.passphrase ? { passphrase: form.passphrase } : {}) }
-      if (form.connection) {
-        void request(`reconnect:${form.id}`, 'connection/reconnect', { id: form.id, ...(form.force ? { force: true } : {}), ...(Object.keys(credentials).length ? { credentials } : {}) }, 'connections', () => {
-          onChanged(); refresh(); update({ reauth: null, notice: '全量后端已连接，共享此连接的项目已刷新。' })
-        }, () => refresh())
-        return
-      }
-      void request(`${switching ? 'switch' : 'reconnect'}:${form.id}`, 'reconnect', { id: form.id, ...(Object.keys(credentials).length ? { credentials } : {}), ...(switching ? { mode: form.mode, ...(form.mode === 'light' && form.localPath.trim() ? { localPath: form.localPath.trim() } : {}) } : {}) }, 'connections', saved => {
-        remember(saved); update({ reauth: null, notice: switching ? `已连接${form.mode === 'full' ? '全量' : '轻量'}模式。原模式入口与会话历史保留，可分别继续使用。` : `「${saved.title}」已重新连接。` })
-      }, () => refresh())
     },
     disconnect: (id: string): void => {
       const record = state.status?.workspaces.find(row => row.id === id)
@@ -490,6 +565,59 @@ function ConnectionIcon({ small = false }: { small?: boolean }) {
 
 function ErrorNotice({ message }: { message: string | null }) {
   return message ? <p className="dsh-ssh__error" role="alert">{message}</p> : null
+}
+
+/** Shared host-key confirmation panel for the add form and the saved-connection area. */
+function HostKeyPanel({ manager, state, area }: Injected & { state: Snapshot; area: HostKeyArea }) {
+  const flow = state.hostKey
+  if (!flow || flow.area !== area) return null
+  const inspection = flow.inspection
+  const inspecting = state.pending.includes('hostkey/inspect')
+  const trusting = state.pending.includes('hostkey/trust')
+  const changed = inspection?.state === 'changed'
+  const untrusted = inspection?.entries.filter(entry => !entry.trusted) ?? []
+  const trustable = (inspection?.state === 'unknown' || inspection?.state === 'partial')
+    && untrusted.length > 0 && untrusted.every(entry => isHostKeyFingerprint(entry.fingerprint))
+  return <section className="dsh-ssh__hostkey" role="group" aria-label="主机密钥验证" data-state={inspection?.state ?? (inspecting ? 'inspecting' : 'error')}>
+    <div className="dsh-ssh__hostkey-head">
+      <div>
+        <strong>主机密钥验证</strong>
+        {inspection
+          ? <span className="dsh-ssh__hostkey-target">目标 <code>{inspection.host}</code> · 端口 {inspection.port}</span>
+          : <span className="dsh-ssh__hostkey-target">{inspecting ? '正在读取目标主机密钥…' : `目标 ${targetLabel(flow.target)}`}</span>}
+      </div>
+      <button type="button" className="dsh-ssh__icon-button" aria-label="关闭主机密钥验证" title="关闭" onClick={manager.dismissHostKey} disabled={trusting}>×</button>
+    </div>
+    <p className="dsh-ssh__hint">插件始终启用严格主机密钥校验，不会跳过验证。信任前，请通过服务器控制台等可信渠道核对以下指纹。</p>
+    {inspecting && <p className="dsh-ssh__hostkey-status" role="status">正在读取服务器出示的主机密钥…</p>}
+    {inspection && <>
+      {!!inspection.entries.length && <ul className="dsh-ssh__hostkey-list" aria-label="服务器出示的主机密钥">
+        {inspection.entries.map(entry => <li key={`${entry.type}:${entry.fingerprint}`} data-trusted={entry.trusted}>
+          <span className="dsh-ssh__hostkey-type">{entry.type}</span>
+          <code className="dsh-ssh__fingerprint">{entry.fingerprint}</code>
+          <span className="dsh-ssh__hostkey-tag" data-trusted={entry.trusted}>{entry.trusted ? '已在 known_hosts' : '未记录'}</span>
+        </li>)}
+      </ul>}
+      {changed && <div className="dsh-ssh__hostkey-warning" role="alert">
+        <strong>服务器出示的主机密钥与 known_hosts 中的记录不一致，连接已阻止。</strong>
+        <ul className="dsh-ssh__hostkey-conflicts" aria-label="主机密钥冲突">
+          {inspection.conflicts.map(conflict => <li key={`${conflict.type}:${conflict.fingerprint}`}>
+            <span className="dsh-ssh__hostkey-type">{conflict.type}</span>
+            <p>当前出示：<code>{conflict.fingerprint}</code></p>
+            <p>已有记录：<code>{conflict.existing === '@revoked' ? '@revoked（已吊销）' : conflict.existing}</code></p>
+          </li>)}
+        </ul>
+        <p>插件不会自动替换已有主机密钥，也不会在未确认时连接。请先通过服务器控制台等可信渠道确认服务器确实更换了密钥；确认无误后在本机运行 <code>ssh-keygen -R {inspection.host}</code> 删除旧记录，然后重试连接。</p>
+      </div>}
+      {!inspecting && !changed && inspection.state === 'known' && <p className="dsh-ssh__hostkey-status" role="status">该主机的密钥已在 known_hosts 中记录，无需再次信任。请关闭此面板后重试连接。</p>}
+      {!inspecting && !changed && inspection.state !== 'known' && !trustable && <p className="dsh-ssh__hostkey-status">没有可信任的新主机密钥。请确认服务器状态后稍后重试，或在终端中处理。</p>}
+    </>}
+    <ErrorNotice message={state.errors.hostkey} />
+    <div className="dsh-ssh__hostkey-actions">
+      {trustable && <button type="button" className="dsh-ssh__button dsh-ssh__button--primary" disabled={trusting || inspecting} onClick={manager.trustHostKeys}>{trusting ? '信任中…' : '信任并重试'}</button>}
+      <button type="button" className="dsh-ssh__text-button" disabled={trusting} onClick={manager.dismissHostKey}>{trustable ? '取消' : '关闭'}</button>
+    </div>
+  </section>
 }
 
 function ProjectRow({ manager, state, item, connection, connectionIndex }: Injected & { state: Snapshot; item: WorkspaceView; connection?: ConnectionGroup; connectionIndex?: number }) {
@@ -660,6 +788,7 @@ function SavedConnections({ manager, state }: Injected & { state: Snapshot }) {
     {!!workspaces.length && <div className="dsh-ssh__filters"><label className="dsh-ssh__field dsh-ssh__field--search"><span className="dsh-ssh__sr-only">搜索远程项目</span><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索项目、设备或路径" /></label><label className="dsh-ssh__field"><span className="dsh-ssh__sr-only">筛选远程项目</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部项目</option><option value="full">全量模式</option><option value="light">轻量模式</option><option value="offline">未连接 / 异常</option><option value="ssh">SSH</option><option value="wsl">WSL</option><option value="docker">Docker</option></select></label><span className="dsh-ssh__filter-count" aria-live="polite">{visible.length === workspaces.length ? `共 ${workspaces.length} 个项目` : `显示 ${visible.length} / ${workspaces.length}`}</span></div>}
     <ErrorNotice message={state.errors.status} />
     <ErrorNotice message={state.errors.connections} />
+    <HostKeyPanel manager={manager} state={state} area="connections" />
     {!workspaces.length && <div className="dsh-ssh__empty">
       <ConnectionIcon /><p>{state.pending.includes('status') ? '正在读取工作区…' : state.errors.status ? '暂时无法读取工作区' : '还没有远程工作区'}</p>
       <span>{state.errors.status ? '点击刷新重试。' : '添加后，也会显示在原生工作区列表中。'}</span>
@@ -893,6 +1022,7 @@ function WorkspaceForm({ manager, state }: Injected & { state: Snapshot }) {
         </fieldset>
       </section>
       <ErrorNotice message={state.errors.form} />
+      <HostKeyPanel manager={manager} state={state} area="form" />
       <div className="dsh-ssh__form-footer"><p>{full ? '远端需 Linux/WSL、Python 3、Bash 和网络访问。首次添加会部署远端 DSH，可能需要数分钟；模型配置使用远端环境，不自动复制本机密钥或插件。' : '远端需 Python 3 和 Bash，不安装 DSH。模型沿用本机配置；使用 Native 工具模式。后台任务、原生终端、PTC 和子代理请使用全量模式。'}</p><button type="submit" className="dsh-ssh__button dsh-ssh__button--primary" disabled={busy || inspecting}>{state.pending.includes('add') ? full ? '部署并连接中…' : '连接中…' : '添加到工作区'}</button></div>
     </form>
   </section>

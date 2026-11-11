@@ -7,8 +7,10 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { validateTarget as validateModelTarget } from './model.js'
 import { REMOTE_HELPER, type HelperRequest } from './remote-helper.js'
+import { classifyHostKeyFailure } from './host-key.js'
+import { HostKeys } from './host-keys.js'
 import { SshAuthBroker } from './ssh-auth.js'
-import { sshTarget, type CommandResult, type DockerHost, type DockerContainer, type PluginConfig, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type RunOptions, type SshTarget, type WslTarget } from './types.js'
+import { sshTarget, type CommandResult, type DockerHost, type DockerContainer, type HostKeyInspection, type HostKeyTrustResult, type PluginConfig, type RemoteDirectory, type RemoteInfo, type RemoteTarget, type RunOptions, type SshTarget, type WslTarget } from './types.js'
 
 const DEFAULT_TIMEOUT = 120_000
 const MAX_TIMEOUT = 600_000
@@ -216,11 +218,19 @@ export class RemoteTransport {
   private readonly config: Settings
   private readonly jobs = new Set<Job>()
   private readonly probes = new Set<Promise<unknown>>()
+  private readonly hostKeys: HostKeys
   private disposed = false
   private disposing: Promise<void> | undefined
   private readonly auth = new SshAuthBroker()
 
-  constructor(config: PluginConfig = {}) { this.config = settings(config) }
+  constructor(config: PluginConfig = {}) {
+    this.config = settings(config)
+    this.hostKeys = new HostKeys({
+      sshExecutable: this.config.sshExecutable,
+      ...(this.config.knownHostsFile ? { knownHostsFile: this.config.knownHostsFile } : {}),
+      connectTimeoutMs: this.config.connectTimeoutMs,
+    })
+  }
 
   setCredentials(target: RemoteTarget, credentials: unknown): void { this.auth.set(validateTarget(target), credentials) }
 
@@ -296,6 +306,18 @@ export class RemoteTransport {
     const value = await this.request(target, { op: 'inspect', path: remotePath(target.remotePath) }, signal)
     for (const key of ['path', 'home', 'user', 'platform', 'python']) text(value[key], `helper ${key}`)
     return value as unknown as RemoteInfo
+  }
+
+  /** Read the host key through the user's own ssh configuration; never trust it automatically. */
+  async inspectHostKeys(target: RemoteTarget): Promise<HostKeyInspection> {
+    this.assertOpen()
+    return this.hostKeys.inspect(validateTarget(target), transportEnvironment())
+  }
+
+  /** Append fingerprints the user confirmed in the UI; conflicts are always refused. */
+  async trustHostKeys(target: RemoteTarget, fingerprints: string[]): Promise<HostKeyTrustResult> {
+    this.assertOpen()
+    return this.hostKeys.trust(validateTarget(target), fingerprints, transportEnvironment())
   }
 
   async browse(target: RemoteTarget, path: string, signal?: AbortSignal): Promise<RemoteDirectory> {
@@ -396,11 +418,16 @@ export class RemoteTransport {
     if (result.timedOut) throw Object.assign(new Error('Remote operation timed out'), { name: 'TimeoutError' })
     if (result.stdoutTruncated || result.stderrTruncated) throw new Error('Remote response exceeded the output limit')
     if (result.exitCode !== 0) {
-      const hint = /UNPROTECTED PRIVATE KEY FILE|bad permissions|permissions.*too open/i.test(result.stderr)
+      const hostKey = classifyHostKeyFailure(result.stderr)
+      const hint = hostKey === 'changed'
+        ? '\n主机密钥与本机已知记录不一致，可能存在中间人或服务器已更换密钥。插件不会自动替换主机密钥；请先核对服务器指纹，确认无误后删除 known_hosts 中该主机的旧记录再重试。'
+        : hostKey === 'unknown'
+        ? '\n本机 known_hosts 中还没有这台主机的密钥。可在插件中核对主机指纹后信任该主机，无需先在终端连接；插件不会跳过严格主机密钥校验。'
+        : /UNPROTECTED PRIVATE KEY FILE|bad permissions|permissions.*too open/i.test(result.stderr)
         ? '\n本机私钥文件权限过宽，已被 OpenSSH 忽略。请将该文件的访问权限限制到当前用户后重试；插件不会自动修改私钥权限。'
         : /Permission denied|sign_and_send_pubkey|Load key|identity file|no such identity/i.test(result.stderr)
         ? '\nSSH 认证失败：请核对登录方式、用户名、密码或密钥；加密私钥请填写私钥口令，也可使用 ssh-agent。证书登录请核对证书有效期及服务器 CA 配置。'
-        : /Host key verification failed/i.test(result.stderr) ? '\n请先在终端手动连接此主机并核对主机指纹，再在插件中重试。' : ''
+        : ''
       throw new Error(`Remote operation failed (exit ${result.exitCode ?? 'terminated'})${result.stderr ? ': ' + result.stderr.slice(-4096).trim() : ''}${hint}`)
     }
   }

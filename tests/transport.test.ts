@@ -497,3 +497,31 @@ test('helper keeps a foreground command alive with periodic heartbeats', async t
   assert.equal(result.exitCode, 0, result.stderr)
   assert.equal(result.stdout, 'heartbeat-ok')
 })
+
+test('host-key failures point at in-app verification and never suggest skipping it', async () => {
+  class HostKeyTransport extends RemoteTransport {
+    constructor(private readonly kind: 'unknown' | 'changed') { super() }
+    protected override spawnProcess(_invocation: Invocation): ChildProcessWithoutNullStreams {
+      const stderr = this.kind === 'changed'
+        ? 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\\nHost key verification failed.\\n'
+        : 'No ED25519 host key is known for example.test and you have requested strict checking.\\nHost key verification failed.\\n'
+      return super.spawnProcess({ executable: process.execPath, args: ['-e', `process.stderr.write(${JSON.stringify(stderr)});process.exit(255)`] })
+    }
+  }
+  const unknown = new HostKeyTransport('unknown')
+  try { await assert.rejects(unknown.inspect(target), /可在插件中核对主机指纹后信任该主机/) } finally { await unknown.dispose() }
+  const changed = new HostKeyTransport('changed')
+  try { await assert.rejects(changed.inspect(target), /插件不会自动替换主机密钥/) } finally { await changed.dispose() }
+})
+
+test('host-key verification is wired only to SSH-backed targets', async () => {
+  const transport = new RemoteTransport()
+  try {
+    await assert.rejects(transport.inspectHostKeys(target), /只有 SSH/)
+    await assert.rejects(transport.inspectHostKeys({ kind: 'docker', container: 'a'.repeat(64), remotePath: '/' }), /只有 SSH/)
+    await assert.rejects(transport.trustHostKeys(target, ['SHA256:' + 'a'.repeat(43)]), /只有 SSH/)
+    await assert.rejects(transport.trustHostKeys(ssh, ['not-a-fingerprint']))
+    const docker: RemoteTarget = { kind: 'docker', container: 'b'.repeat(64), via: ssh, remotePath: '/' }
+    await assert.rejects(transport.trustHostKeys(docker, ['not-a-fingerprint']), /无效/)
+  } finally { await transport.dispose() }
+})

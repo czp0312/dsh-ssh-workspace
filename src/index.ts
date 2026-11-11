@@ -135,6 +135,20 @@ export async function apply(ctx: Context, config: PluginConfig = {}): Promise<vo
           transport.setCredentials(target, request.credentials)
           value = await transport.inspect(target, signal); break
         }
+        case 'hostkey/inspect': {
+          // Reading a host key only needs the SSH address; credentials stay in the process.
+          const target = validateTarget(object(payload).target)
+          value = await transport.inspectHostKeys(target); break
+        }
+        case 'hostkey/trust': {
+          const request = object(payload)
+          const target = validateTarget(request.target)
+          const fingerprints = request.fingerprints
+          if (!Array.isArray(fingerprints) || fingerprints.length === 0 || fingerprints.length > 16 || fingerprints.some(item => typeof item !== 'string')) {
+            throw new Error('无效的主机密钥指纹。')
+          }
+          value = await transport.trustHostKeys(target, fingerprints); break
+        }
         case 'browse': {
           const request = object(payload)
           if (typeof request.path !== 'string') throw new Error('缺少远程浏览路径。')

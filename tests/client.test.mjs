@@ -119,6 +119,9 @@ const select = async (suffix, value) => {
   await act(async () => { element.value = value; element.dispatchEvent(new window.Event('change', { bubbles: true })) })
 }
 
+/** A synthetic OpenSSH SHA256 fingerprint: the prefix plus 43 unpadded base64 characters. */
+const fingerprint = letter => `SHA256:${letter.repeat(43)}`
+
 const groupedRow = (id, changes = {}) => ({ id, workspaceId: `native-${id}`, title: id, mode: 'full', backendId: 'shared', registered: true, connectionState: 'connected', backendHealth: { connectionState: 'connected' }, target: { kind: 'wsl', distribution: 'DemoLinux', remotePath: `/srv/${id}` }, ...changes })
 
 test('one environment lists mixed modes together and switching one project never marks siblings as reconnecting', async () => {
@@ -699,5 +702,208 @@ test('remote directory breadcrumbs jump to any ancestor path', async () => {
     await click(button('上一级'))
     assert.equal(fixture.calls.filter(call => call.method === 'browse').at(-1).input.path, '/')
     assert.ok(button('subproject'))
+  } finally { await fixture.dispose() }
+})
+
+test('an unknown host-key failure in the add form inspects fingerprints and retries the test once after trust', async () => {
+  const ed = fingerprint('A')
+  const rsa = fingerprint('B')
+  const target = { kind: 'ssh', host: 'demo.example', remotePath: '/srv/project' }
+  let tests = 0
+  const fixture = await mount({ respond(method) {
+    if (method === 'test') {
+      tests += 1
+      if (tests === 1) return { ok: false, error: { message: 'Remote operation failed (exit 255): No ED25519 host key is known for demo.example and you have requested strict checking.\nHost key verification failed.' } }
+      return { ok: true, value: { path: '/srv/project', home: '/home/test', user: 'test', platform: 'Linux', python: '3.10.12' } }
+    }
+    if (method === 'hostkey/inspect') return { ok: true, value: { host: 'demo.example', port: 22, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'partial', entries: [
+      { type: 'ssh-ed25519', fingerprint: ed, trusted: false },
+      { type: 'ssh-rsa', fingerprint: rsa, trusted: true },
+    ], conflicts: [] } }
+    if (method === 'hostkey/trust') return { ok: true, value: { knownHostsFile: '/home/test/.ssh/known_hosts', added: [{ type: 'ssh-ed25519', fingerprint: ed }] } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await input('host', 'demo.example')
+    await input('path', '/srv/project')
+    await input('password', 'synthetic-password')
+    await click(button('测试连接'))
+    assert.equal(fixture.calls.filter(call => call.method === 'test').length, 1, 'the first attempt still runs exactly once')
+    const inspect = fixture.calls.find(call => call.method === 'hostkey/inspect')
+    assert.deepEqual(inspect.input, { target }, 'inspection sends the target only, never credentials')
+    const panel = document.querySelector('.dsh-ssh__hostkey')
+    assert.ok(panel, 'a host-key failure opens the verification panel')
+    assert.equal(panel.getAttribute('role'), 'group')
+    assert.deepEqual(fixture.calls.filter(call => call.method === 'hostkey/inspect').map(call => Object.keys(call.input)), [['target']])
+    assert.match(panel.textContent, /主机密钥验证/)
+    assert.match(panel.textContent, /严格主机密钥校验/)
+    assert.match(panel.textContent, /demo\.example/)
+    assert.match(panel.textContent, /端口 22/)
+    assert.ok(panel.textContent.includes(ed), 'the presented fingerprint is visible')
+    assert.ok(panel.textContent.includes(rsa), 'every scanned key type is visible')
+    assert.match(panel.textContent, /未记录/)
+    assert.match(panel.textContent, /已在 known_hosts/)
+    const trustButton = button('信任并重试')
+    assert.equal(trustButton.disabled, false)
+    await click(trustButton)
+    const trust = fixture.calls.find(call => call.method === 'hostkey/trust')
+    assert.deepEqual(trust.input, { target, fingerprints: [ed] }, 'only untrusted fingerprints are trusted and never an existing record')
+    assert.equal(JSON.stringify(fixture.calls.filter(call => call.method.startsWith('hostkey')).map(call => call.input)).includes('synthetic-password'), false)
+    assert.equal(fixture.calls.filter(call => call.method === 'test').length, 2, 'trust repeats the failed test exactly once')
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null)
+    assert.match(document.querySelector('.dsh-ssh__success').textContent, /Linux.*Python 3\.10\.12/)
+  } finally { await fixture.dispose() }
+})
+
+test('a changed host key never offers trust and can be dismissed before retrying', async () => {
+  const presented = fingerprint('C')
+  const existing = fingerprint('D')
+  const fixture = await mount({ respond(method) {
+    if (method === 'test') return { ok: false, error: { message: '@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key for demo.example has changed' } }
+    if (method === 'hostkey/inspect') return { ok: true, value: { host: 'demo.example', port: 2222, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'changed', entries: [{ type: 'ssh-ed25519', fingerprint: presented, trusted: true }], conflicts: [{ type: 'ssh-ed25519', fingerprint: presented, existing }] } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await input('host', 'demo.example')
+    await input('port', '2222')
+    await input('path', '/srv/project')
+    await click(button('测试连接'))
+    const panel = document.querySelector('.dsh-ssh__hostkey')
+    assert.ok(panel)
+    assert.equal(panel.dataset.state, 'changed')
+    assert.ok(panel.textContent.includes(presented))
+    assert.ok(panel.textContent.includes(existing))
+    assert.match(panel.textContent, /不会自动替换已有主机密钥/)
+    assert.match(panel.textContent, /ssh-keygen -R demo\.example/)
+    assert.equal(panel.querySelector('.dsh-ssh__button--primary'), null, 'a changed key is never trusted from the UI')
+    assert.equal(fixture.calls.some(call => call.method === 'hostkey/trust'), false)
+    await click(button('关闭'))
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null)
+    await click(button('测试连接'))
+    assert.ok(document.querySelector('.dsh-ssh__hostkey'), 'a repeated failure reopens the panel')
+    await click(button('WSL'))
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null, 'switching tabs resets the panel')
+    assert.equal(document.querySelector('.dsh-ssh__error'), null, 'the old form error is cleared with the target')
+  } finally { await fixture.dispose() }
+})
+
+test('host-key inspection failures and already-trusted keys stay informational', async () => {
+  let inspected = false
+  const fixture = await mount({ respond(method) {
+    if (method === 'test') return { ok: false, error: { message: 'Host key verification failed.' } }
+    if (method === 'hostkey/inspect') {
+      if (!inspected) return { ok: false, error: { message: 'ssh-keyscan 未返回主机密钥。' } }
+      return { ok: true, value: { host: 'demo.example', port: 22, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'known', entries: [{ type: 'ssh-ed25519', fingerprint: fingerprint('E'), trusted: true }], conflicts: [] } }
+    }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await input('host', 'demo.example')
+    await input('path', '/srv/project')
+    await click(button('测试连接'))
+    let panel = document.querySelector('.dsh-ssh__hostkey')
+    assert.ok(panel)
+    assert.match(panel.querySelector('.dsh-ssh__error').textContent, /ssh-keyscan 未返回主机密钥/)
+    assert.equal(panel.querySelector('.dsh-ssh__button--primary'), null, 'an inspection error never offers trust')
+    await click(button('关闭'))
+    inspected = true
+    await click(button('测试连接'))
+    panel = document.querySelector('.dsh-ssh__hostkey')
+    assert.ok(panel)
+    assert.match(panel.textContent, /无需再次信任/)
+    assert.equal(panel.querySelector('.dsh-ssh__button--primary'), null, 'a known key never offers trust')
+    assert.equal(fixture.calls.some(call => call.method === 'hostkey/trust'), false)
+  } finally { await fixture.dispose() }
+})
+
+test('a saved SSH reconnect opens the verification panel and retries the same reconnect after trust', async () => {
+  const ed = fingerprint('F')
+  const row = { id: 'saved-ssh', workspaceId: 'native-ssh', title: 'saved-ssh', mode: 'light', registered: true, disconnected: true, target: { kind: 'ssh', host: 'saved.example', remotePath: '/srv/project' } }
+  let reconnects = 0
+  const fixture = await mount({ initialSaved: [row], respond(method) {
+    if (method === 'reconnect') {
+      reconnects += 1
+      if (reconnects === 1) return { ok: false, error: { message: 'Remote operation failed (exit 255): No ED25519 host key is known for saved.example and you have requested strict checking.\nHost key verification failed.' } }
+      return { ok: true, value: { ...row, disconnected: false, connectionState: 'connected' } }
+    }
+    if (method === 'hostkey/inspect') return { ok: true, value: { host: 'saved.example', port: 22, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'unknown', entries: [{ type: 'ssh-ed25519', fingerprint: ed, trusted: false }], conflicts: [] } }
+    if (method === 'hostkey/trust') return { ok: true, value: { knownHostsFile: '/home/test/.ssh/known_hosts', added: [{ type: 'ssh-ed25519', fingerprint: ed }] } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await click(button('连接 saved-ssh'))
+    assert.equal(fixture.calls.filter(call => call.method === 'reconnect').length, 1)
+    const panel = document.querySelector('.dsh-ssh__saved .dsh-ssh__hostkey')
+    assert.ok(panel, 'the reconnect failure shows the panel in the saved-connection error area')
+    assert.deepEqual(fixture.calls.find(call => call.method === 'hostkey/inspect').input, { target: row.target })
+    await click(button('信任并重试'))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'hostkey/trust').input, { target: row.target, fingerprints: [ed] })
+    assert.equal(fixture.calls.filter(call => call.method === 'reconnect').length, 2)
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null)
+    assert.match(document.querySelector('.dsh-ssh__notice').textContent, /已重新连接/)
+  } finally { await fixture.dispose() }
+})
+
+test('a shared full backend host-key failure retries the connection after trust', async () => {
+  const ed = fingerprint('G')
+  const row = { id: 'full-ssh', workspaceId: 'native-full', title: 'full-ssh', mode: 'full', backendId: 'backend-1', registered: true, disconnected: true, target: { kind: 'ssh', host: 'shared.example', port: 2222, remotePath: '/srv/api' } }
+  let connections = 0
+  const fixture = await mount({ initialSaved: [row], respond(method) {
+    if (method === 'connection/reconnect') {
+      connections += 1
+      if (connections === 1) return { ok: false, error: { message: 'Remote operation failed (exit 255): No ED25519 host key is known for shared.example and you have requested strict checking.\nHost key verification failed.' } }
+      return { ok: true, value: null }
+    }
+    if (method === 'hostkey/inspect') return { ok: true, value: { host: 'shared.example', port: 2222, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'unknown', entries: [{ type: 'ssh-ed25519', fingerprint: ed, trusted: false }], conflicts: [] } }
+    if (method === 'hostkey/trust') return { ok: true, value: { knownHostsFile: '/home/test/.ssh/known_hosts', added: [{ type: 'ssh-ed25519', fingerprint: ed }] } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await click(button('连接 shared.example:2222 的全量连接'))
+    assert.equal(fixture.calls.filter(call => call.method === 'connection/reconnect').length, 1)
+    assert.ok(document.querySelector('.dsh-ssh__saved .dsh-ssh__hostkey'), 'the shared connection failure uses the same panel')
+    assert.deepEqual(fixture.calls.find(call => call.method === 'hostkey/inspect').input, { target: row.target })
+    await click(button('信任并重试'))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'hostkey/trust').input, { target: row.target, fingerprints: [ed] })
+    assert.equal(fixture.calls.filter(call => call.method === 'connection/reconnect').length, 2, 'trust retries the shared connection rather than a project reconnect')
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null)
+    assert.match(document.querySelector('.dsh-ssh__notice').textContent, /全量后端已连接/)
+  } finally { await fixture.dispose() }
+})
+
+test('an add host-key failure opens the panel, resets when the dialog closes, and trust retries the add once', async () => {
+  const ed = fingerprint('H')
+  const target = { kind: 'ssh', host: 'add.example', remotePath: '/srv/new' }
+  let adds = 0
+  const fixture = await mount({ respond(method) {
+    if (method === 'add') {
+      adds += 1
+      if (adds < 3) return { ok: false, error: { message: 'Remote operation failed (exit 255): No ED25519 host key is known for add.example and you have requested strict checking.\nHost key verification failed.' } }
+      return { ok: true, value: { id: 'remote-hostkey', workspaceId: 'native-hostkey', title: 'new-project', mode: 'full', target, createdAt: 1, registered: true, connectionState: 'connected', online: true } }
+    }
+    if (method === 'hostkey/inspect') return { ok: true, value: { host: 'add.example', port: 22, knownHostsFile: '/home/test/.ssh/known_hosts', state: 'unknown', entries: [{ type: 'ssh-ed25519', fingerprint: ed, trusted: false }], conflicts: [] } }
+    if (method === 'hostkey/trust') return { ok: true, value: { knownHostsFile: '/home/test/.ssh/known_hosts', added: [{ type: 'ssh-ed25519', fingerprint: ed }] } }
+  } })
+  try {
+    await click(button('远程工作区'))
+    await input('host', 'add.example')
+    await input('path', '/srv/new')
+    await click(button('添加到工作区'))
+    assert.equal(fixture.calls.filter(call => call.method === 'add').length, 1)
+    assert.ok(document.querySelector('.dsh-ssh__new .dsh-ssh__hostkey'), 'the add form shows the panel below its error')
+    await click(button('关闭远程工作区管理'))
+    await click(button('远程工作区'))
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null, 'reopening the dialog never restores a stale panel')
+    await click(button('添加到工作区'))
+    assert.equal(fixture.calls.filter(call => call.method === 'add').length, 2)
+    const panel = document.querySelector('.dsh-ssh__hostkey')
+    assert.ok(panel, 'the repeated failure reopens the panel')
+    assert.match(panel.textContent, /未记录/)
+    await click(button('信任并重试'))
+    assert.deepEqual(fixture.calls.find(call => call.method === 'hostkey/trust').input, { target, fingerprints: [ed] })
+    assert.equal(fixture.calls.filter(call => call.method === 'add').length, 3, 'trust retries the add exactly once')
+    assert.equal(document.querySelector('.dsh-ssh__hostkey'), null)
+    assert.match(document.querySelector('.dsh-ssh__notice').textContent, /已添加「new-project」/)
+    assert.ok(document.querySelector('.dsh-ssh__saved'))
   } finally { await fixture.dispose() }
 })
