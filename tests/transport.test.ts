@@ -318,7 +318,9 @@ test('both output streams are bounded tails while excess output is drained, incl
 test('a real deadline stops the command and its descendants without retrying', async t => {
   const { transport } = await fixture(t)
   const result = await transport.run(target, command('import subprocess,sys,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);print(p.pid,flush=True);time.sleep(60)'), { timeoutMs: 3000 })
-  assert.equal(result.timedOut, true)
+  // The helper enforces the same deadline remotely and may report it first: 124 is its
+  // timeout marker, while timedOut marks the local safety net. Either stops it once.
+  assert.ok(result.timedOut || result.exitCode === 124, JSON.stringify({ exitCode: result.exitCode, timedOut: result.timedOut }))
   assert.equal(result.aborted, false)
   assert.equal(transport.calls.length, 1)
   const pid = Number(result.stdout.trim())
