@@ -5,7 +5,7 @@ import { BACKEND_BOOTSTRAP } from './backend-bootstrap.js'
 import { BackendTunnel, BackendWire } from './backend-wire.js'
 import { remoteId } from './backend-protocol.js'
 import { targetKey, validateTarget } from './model.js'
-import { VERIFIED_DSH_VERSION, targetLabel, type ConnectionHealth, type PluginConfig, type RemoteTarget, type SavedWorkspace, type WorkspaceView } from './types.js'
+import { TARGET_DSH_VERSION, targetLabel, type ConnectionHealth, type PluginConfig, type RemoteTarget, type SavedWorkspace, type WorkspaceView } from './types.js'
 import type { RemoteTransport } from './transport.js'
 
 export interface BackendProject extends SavedWorkspace { backendId: string; backend: true; workspace: any }
@@ -66,8 +66,8 @@ export class RemoteBackends {
     return createHash('sha256').update(JSON.stringify(connection)).digest('hex').slice(0, 24)
   }
   protected async createConnection(target: RemoteTarget, signal: AbortSignal): Promise<RunningBackend> {
-    const state = await this.transport.python<{ port: number; token: string; path: string; version: string }>(target, BACKEND_BOOTSTRAP, { version: VERIFIED_DSH_VERSION, path: target.remotePath }, signal)
-    if (state.version !== VERIFIED_DSH_VERSION || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535 || !/^[A-Za-z0-9_-]+$/.test(state.token)) throw new Error('Invalid remote DSH handshake')
+    const state = await this.transport.python<{ port: number; token: string; path: string; version: string }>(target, BACKEND_BOOTSTRAP, { version: TARGET_DSH_VERSION, path: target.remotePath }, signal)
+    if (state.version !== TARGET_DSH_VERSION || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535 || !/^[A-Za-z0-9_-]+$/.test(state.token)) throw new Error('Invalid remote DSH handshake')
     const tunnel = new BackendTunnel(target, state.port, this.config, this.transport)
     let wire: BackendWire | undefined
     try {

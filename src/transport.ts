@@ -21,6 +21,40 @@ const PROBE_NAME = /^\.dsh-ssh-probe-[a-f0-9]{32}$/
 const PROBE_TOKEN = /^[a-f0-9]{64}$/
 
 export interface Invocation { executable: string; args: string[]; env?: NodeJS.ProcessEnv }
+// Never serialize credentials with argv or environment. Metadata lives only in memory.
+type SudoHandshake = { prompt: string; ready?: string; password?: string }
+const sudoHandshakes = new WeakMap<Invocation, SudoHandshake>()
+
+/** sudo -S reads from stdin only when its private prompt appears. Gate all
+ * business input until the unprivileged container helper confirms it started.
+ * NOPASSWD must never receive the password as application input. */
+export function startSudoInput(invocation: Invocation, child: ChildProcessWithoutNullStreams, onReady: () => void): void {
+  const auth = sudoHandshakes.get(invocation)
+  if (!auth) { onReady(); return }
+  if (!auth.password) { child.stdin.end(); child.kill(); return }
+  let sent = false
+  let pending = ''
+  const onData = (chunk: Buffer) => {
+    pending += chunk.toString('utf8')
+    while (true) {
+      const p = pending.indexOf(auth.prompt)
+      const r = auth.ready ? pending.indexOf(auth.ready) : -1
+      if (r >= 0 && (p < 0 || r < p)) {
+        child.stderr.off('data', onData)
+        onReady()
+        return
+      }
+      if (p < 0) break
+      pending = pending.slice(p + auth.prompt.length)
+      if (sent) { child.stderr.off('data', onData); child.stdin.end(); return }
+      sent = true
+      if (!child.stdin.destroyed && child.stdin.writable) child.stdin.write(auth.password + '\n')
+    }
+    pending = pending.slice(-Math.max(auth.prompt.length, auth.ready?.length ?? 0))
+  }
+  child.stderr.on('data', onData)
+  child.once('close', () => child.stderr.off('data', onData))
+}
 type StopReason = 'aborted' | 'timedOut'
 interface Job { stop(reason: StopReason): void; done: Promise<CommandResult> }
 type Settings = Required<Pick<PluginConfig, 'sshExecutable' | 'wslExecutable' | 'dockerExecutable' | 'pythonExecutable' | 'connectTimeoutMs'>> & Pick<PluginConfig, 'knownHostsFile'>
@@ -113,18 +147,25 @@ export function buildPythonInvocation(target: RemoteTarget, script: string, requ
   // docker exec preserves the image's HOME even for --user; resolve the selected
   // identity from passwd before DSH or any skill resolves its user directories.
   if (target.kind === 'docker') {
-    const source = 'import os,pwd\nu=pwd.getpwuid(os.geteuid())\nos.environ.update(HOME=u.pw_dir,USER=u.pw_name,LOGNAME=u.pw_name)\n' + script
-    return buildDockerInvocation(target, ['exec', '-i', ...(target.user ? ['--user', target.user] : []), target.container, cfg.pythonExecutable, '-u', '-c', source, encoded], config, allowPrompts)
+    const ready = target.sudo === 'password' ? 'DSH_SUDO_READY_' + randomBytes(16).toString('hex') : undefined
+    const source = (ready ? `import sys\nsys.stderr.write(${JSON.stringify(ready)}+'\\n');sys.stderr.flush()\n` : '') + 'import os,pwd\nu=pwd.getpwuid(os.geteuid())\nos.environ.update(HOME=u.pw_dir,USER=u.pw_name,LOGNAME=u.pw_name)\n' + script
+    return buildDockerInvocation(target, ['exec', '-i', ...(target.user ? ['--user', target.user] : []), target.container, cfg.pythonExecutable, '-u', '-c', source, encoded], config, allowPrompts, ready)
   }
   return buildCommandInvocation(target, [cfg.pythonExecutable, '-u', '-c', script, encoded], config, allowPrompts)
 }
 
-export function buildDockerInvocation(host: DockerHost, args: string[], config: PluginConfig = {}, allowPrompts = false): Invocation {
-  const canonical = validateModelTarget({ kind: 'docker', container: 'validation', remotePath: '/', ...host })
+export function buildDockerInvocation(host: DockerHost, args: string[], config: PluginConfig = {}, allowPrompts = false, ready?: string): Invocation {
+  const canonical = validateModelTarget({ kind: 'docker', container: 'validation', remotePath: '/', context: host.context, via: host.via, sudo: host.sudo })
   if (canonical.kind !== 'docker') throw new Error('Invalid Docker host')
   const cfg = settings(config)
   const argv = [...(canonical.context ? ['--context', canonical.context] : []), ...args]
-  return canonical.via ? buildCommandInvocation(canonical.via, ['docker', ...argv], config, allowPrompts)
+  if (canonical.sudo === 'password' && canonical.via) {
+    const prompt = 'DSH_SUDO_PROMPT_' + randomBytes(16).toString('hex')
+    const invocation = buildCommandInvocation(canonical.via, ['sudo', '-S', '-k', '-p', prompt, '--', 'docker', ...argv], config, allowPrompts)
+    sudoHandshakes.set(invocation, { prompt, ready })
+    return invocation
+  }
+  return canonical.via ? buildCommandInvocation(canonical.via, [...(canonical.sudo ? ['sudo', '-n', '--'] : []), 'docker', ...argv], config, allowPrompts)
     : checkInvocation({ executable: cfg.dockerExecutable, args: argv })
 }
 
@@ -238,7 +279,18 @@ export class RemoteTransport {
     if (!cleanup) this.assertOpen()
     await validateIdentityFile(target)
     const env = { ...transportEnvironment(), ...(target.kind === 'docker' && !target.via ? dockerEnvironment() : {}), ...await this.auth.environment(target) }
-    return { ...buildPythonInvocation(target, script, payload, this.config, this.auth.has(target)), env }
+    const invocation = buildPythonInvocation(target, script, payload, this.config, this.auth.has(target))
+    invocation.env = env
+    this.attachSudoPassword(target, invocation)
+    return invocation
+  }
+
+  private attachSudoPassword(target: RemoteTarget, invocation: Invocation): void {
+    const auth = sudoHandshakes.get(invocation)
+    if (!auth) return
+    const password = this.auth.sudoPassword(target)
+    if (!password) throw new Error('请重新输入 sudo 密码；仅保留在当前进程内。')
+    auth.password = password
   }
 
   async python<T>(target: RemoteTarget, script: string, payload: unknown, signal?: AbortSignal): Promise<T> {
@@ -270,6 +322,7 @@ export class RemoteTransport {
     await validateIdentityFile(target)
     const invocation = buildDockerInvocation(host, args, this.config, this.auth.has(target))
     invocation.env = { ...transportEnvironment(), ...(!host.via ? dockerEnvironment() : {}), ...await this.auth.environment(target) }
+    this.attachSudoPassword(target, invocation)
     const result = await this.execute(invocation, this.requestTimeout, DEFAULT_OUTPUT, signal)
     this.requireSuccess(result)
     return result.stdout
@@ -419,13 +472,20 @@ export class RemoteTransport {
     if (result.stdoutTruncated || result.stderrTruncated) throw new Error('Remote response exceeded the output limit')
     if (result.exitCode !== 0) {
       const hostKey = classifyHostKeyFailure(result.stderr)
-      const hint = hostKey === 'changed'
+      const stderr = result.stderr
+      const hint = /Sorry, try again|incorrect password attempt|sudo:.*(?:incorrect password|no password was provided)/i.test(stderr)
+        ? '\n sudo 密码认证失败，请重新输入 sudo 密码。'
+        : /sudo:.*(?:password|terminal|not allowed|not in the sudoers|may not run|authentication|permission denied)/i.test(stderr)
+        ? '\n远端 sudo Docker 未获非交互式授权。请管理员确认 sudo -n -- docker ps 可执行；不会自动提交密码。'
+        : /(?:docker daemon socket|docker\.sock|docker_engine)/i.test(stderr) && /permission denied|access is denied/i.test(stderr)
+        ? '\nDocker daemon 权限不足：请确认 SSH 用户有 Docker 权限，或明确选择 sudo Docker（需管理员授权非交互式 sudo）。'
+        : hostKey === 'changed'
         ? '\n主机密钥与本机已知记录不一致，可能存在中间人或服务器已更换密钥。插件不会自动替换主机密钥；请先核对服务器指纹，确认无误后删除 known_hosts 中该主机的旧记录再重试。'
         : hostKey === 'unknown'
         ? '\n本机 known_hosts 中还没有这台主机的密钥。可在插件中核对主机指纹后信任该主机，无需先在终端连接；插件不会跳过严格主机密钥校验。'
         : /UNPROTECTED PRIVATE KEY FILE|bad permissions|permissions.*too open/i.test(result.stderr)
         ? '\n本机私钥文件权限过宽，已被 OpenSSH 忽略。请将该文件的访问权限限制到当前用户后重试；插件不会自动修改私钥权限。'
-        : /Permission denied|sign_and_send_pubkey|Load key|identity file|no such identity/i.test(result.stderr)
+        : (/Permission denied \([^\r\n]+\)|sign_and_send_pubkey|Load key|no such identity/i.test(stderr) || (result.exitCode === 255 && /Permission denied|identity file/i.test(stderr)))
         ? '\nSSH 认证失败：请核对登录方式、用户名、密码或密钥；加密私钥请填写私钥口令，也可使用 ssh-agent。证书登录请核对证书有效期及服务器 CA 配置。'
         : ''
       throw new Error(`Remote operation failed (exit ${result.exitCode ?? 'terminated'})${result.stderr ? ': ' + result.stderr.slice(-4096).trim() : ''}${hint}`)
@@ -494,13 +554,19 @@ export class RemoteTransport {
     })
     const job: Job = { stop, done }
     this.jobs.add(job)
+    let inputReady = false
     const beat = () => {
-      if (!settled && !stopReason && !child.stdin.destroyed && child.stdin.writable && child.stdin.writableLength < 1024) child.stdin.write('h\n')
+      if (inputReady && !settled && !stopReason && !child.stdin.destroyed && child.stdin.writable && child.stdin.writableLength < 1024) child.stdin.write('h\n')
     }
     deadline = setTimeout(() => stop('timedOut'), timeoutMs)
     heartbeat = setInterval(beat, 1_000)
     signal?.addEventListener('abort', onAbort, { once: true })
-    if (signal?.aborted) onAbort(); else { if (input) child.stdin.write(input); beat() }
+    if (signal?.aborted) onAbort(); else startSudoInput(invocation, child, () => {
+      if (settled || stopReason) return
+      inputReady = true
+      if (input) child.stdin.write(input)
+      beat()
+    })
     return done
   }
 }

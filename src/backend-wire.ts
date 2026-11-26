@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { WebSocket } from 'ws'
 import { BACKEND_TUNNEL } from './backend-bootstrap.js'
-import { buildPythonInvocation, transportEnvironment, validateIdentityFile, type RemoteTransport } from './transport.js'
+import { buildPythonInvocation, startSudoInput, transportEnvironment, validateIdentityFile, type RemoteTransport } from './transport.js'
 import type { PluginConfig, RemoteTarget } from './types.js'
 
 export class BackendTunnel {
@@ -19,8 +19,12 @@ export class BackendTunnel {
       this.sockets.add(socket)
       const child = spawn(invocation.executable, invocation.args, { env: invocation.env ?? transportEnvironment(), windowsHide: true, stdio: 'pipe' })
       this.children.add(child)
-      socket.pipe(child.stdin); child.stdout.pipe(socket)
+      const authDeadline = setTimeout(() => socket.destroy(), 30_000)
+      startSudoInput(invocation, child, () => { clearTimeout(authDeadline); socket.pipe(child.stdin) })
+      child.stdout.pipe(socket)
       child.stderr.resume()
+      child.once('close', () => clearTimeout(authDeadline))
+      socket.once('close', () => clearTimeout(authDeadline))
       child.stdin.on('error', () => socket.destroy())
       child.once('error', () => socket.destroy())
       child.once('close', () => { socket.destroy(); this.children.delete(child) })

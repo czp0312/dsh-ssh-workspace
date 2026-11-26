@@ -11,7 +11,7 @@ export function validateCredentials(input: unknown): SshCredentials {
   if (input === undefined) return {}
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('无效的 SSH 凭据。')
   const result: SshCredentials = {}
-  for (const name of ['password', 'passphrase'] as const) {
+  for (const name of ['password', 'passphrase', 'sudoPassword'] as const) {
     const value = (input as Record<string, unknown>)[name]
     if (value === undefined || value === '') continue
     if (typeof value !== 'string' || value.length > 16384 || /[\0\r\n]/u.test(value)) throw new Error('SSH 密码或口令格式无效。')
@@ -39,19 +39,24 @@ export class SshAuthBroker {
     if (this.disposed) throw new Error('SSH 认证服务已关闭。')
     const key = connectionKey(target)
     const credentials = validateCredentials(input)
+    if (credentials.sudoPassword && (target.kind !== 'docker' || target.sudo !== 'password')) throw new Error('仅 sudo Docker 密码模式使用 sudo 密码。')
     const ssh = sshTarget(target)
     if (!key || !Object.keys(credentials).length) return
     if ((ssh?.auth === 'key' || ssh?.auth === 'certificate') && credentials.password) throw new Error('密钥和证书方式不使用登录密码。')
     if (ssh?.auth === 'password' && credentials.passphrase) throw new Error('仅密码方式不使用私钥口令。')
-    this.entries.set(key, { token: this.entries.get(key)?.token ?? randomBytes(32).toString('hex'), credentials })
+    this.entries.set(key, { token: this.entries.get(key)?.token ?? randomBytes(32).toString('hex'), credentials: { ...this.entries.get(key)?.credentials, ...credentials } })
   }
 
-  has(target: RemoteTarget): boolean { return this.entries.has(connectionKey(target)) }
+  sudoPassword(target: RemoteTarget): string | undefined {
+    return target.kind === 'docker' && target.sudo === 'password' ? this.entries.get(connectionKey(target))?.credentials.sudoPassword : undefined
+  }
+
+  has(target: RemoteTarget): boolean { const credentials = this.entries.get(connectionKey(target))?.credentials; return !!(credentials?.password || credentials?.passphrase) }
 
   async environment(target: RemoteTarget): Promise<NodeJS.ProcessEnv> {
     if (this.disposed) throw new Error('SSH 认证服务已关闭。')
     const entry = this.entries.get(connectionKey(target))
-    if (!entry) {
+    if (!entry || (!entry.credentials.password && !entry.credentials.passphrase)) {
       if (sshTarget(target)?.auth === 'password') throw new Error('请重新输入 SSH 密码；密码仅保留在当前进程内，重启后不会保存。')
       return { SSH_ASKPASS_REQUIRE: 'never' }
     }

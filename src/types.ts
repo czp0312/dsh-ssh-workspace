@@ -3,7 +3,10 @@ import manifest from '../package.json' with { type: 'json' }
 export const RPC_CHANNEL = '/api'
 export const RPC_PREFIX = 'dsh-ssh-workspaces'
 export const PLUGIN_VERSION = manifest.version
+// Last upstream version verified against a real desktop/WSL deployment.
 export const VERIFIED_DSH_VERSION = '0.2.2-rc.1'
+// This fork targets rc.5; real remote compatibility is tested separately in CI.
+export const TARGET_DSH_VERSION = manifest.devDependencies['@deepseek-ai/dsh-tools']
 
 export interface WslTarget {
   kind: 'wsl'
@@ -26,7 +29,7 @@ export interface SshTarget {
 }
 
 /** RPC-only input. Never place these fields on a target or durable workspace. */
-export interface SshCredentials { password?: string; passphrase?: string }
+export interface SshCredentials { password?: string; passphrase?: string; sudoPassword?: string }
 
 export interface DockerTarget {
   kind: 'docker'
@@ -36,11 +39,13 @@ export interface DockerTarget {
   context?: string
   /** Execute Docker on an SSH host; mutually exclusive with a local Docker context. */
   via?: SshTarget
+  /** Explicit non-interactive sudo for Docker on the SSH host only. */
+  sudo?: true | 'password'
   user?: string
   remotePath: string
 }
 
-export interface DockerHost { context?: string; via?: SshTarget }
+export interface DockerHost { context?: string; via?: SshTarget; sudo?: true | 'password' }
 export interface DockerContainer { id: string; name: string; image: string; state: string; status: string }
 export type RemoteTarget = WslTarget | SshTarget | DockerTarget
 

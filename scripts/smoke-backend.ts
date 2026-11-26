@@ -8,11 +8,17 @@ import { WorkspaceManager, type NativeWorkspace } from '../src/manager.js'
 import { WorkspaceStore } from '../src/storage.js'
 import { WorkspaceConnections } from '../src/connections.js'
 
+const docker = process.env.DSH_SMOKE_DOCKER
+const mount = process.env.DSH_SMOKE_MOUNT
+const dockerUser = process.env.DSH_SMOKE_DOCKER_USER
+if (docker && !mount) throw new Error('DSH_SMOKE_MOUNT must point to the disposable host directory mounted at /workspace')
 const transport = new RemoteTransport()
 const backends = new RemoteBackends(resolve('.test-artifacts/backend-smoke.json'), transport)
 await backends.load()
 try {
-  const record = await backends.add({ target: { kind: 'wsl', distribution: 'Ubuntu-22.04', remotePath: '/home/cczp/.cache/dsh-ssh-workspaces-desktop-check' }, title: 'WSL 远程后端验收' })
+  const record = await backends.add(docker
+    ? { target: { kind: 'docker', container: docker, ...(dockerUser ? { user: dockerUser } : {}), remotePath: '/workspace' }, title: 'Docker 远程后端验收' }
+    : { target: { kind: 'wsl', distribution: 'Ubuntu-22.04', remotePath: '/home/cczp/.cache/dsh-ssh-workspaces-desktop-check' }, title: 'WSL 远程后端验收' })
   const wire = await backends.wire(record.backendId)
   const workspaceId = translateIds({ workspaceId: record.workspaceId }, record.backendId, false).workspaceId
   const call = async (endpoint: string, args: any) => {
@@ -67,7 +73,7 @@ try {
   wire.cancel(stream)
   await backends.checkHealth(AbortSignal.timeout(15_000))
   assert.equal(backends.list().find(row => row.id === record.id)?.connectionState, 'connected')
-  // Exercise a real WSL mode switch while using a private native registry, so
+  // Exercise a real remote mode switch while using a private native registry, so
   // the user's desktop folders and existing sessions are never rewritten.
   const natives = new Map<string, NativeWorkspace>()
   const light = new WorkspaceManager({
@@ -79,7 +85,7 @@ try {
   await light.load()
   try {
     const connections = new WorkspaceConnections(light, backends)
-    const lightweight = await connections.reconnect(record.id, AbortSignal.timeout(30_000), { mode: 'light' })
+    const lightweight = await connections.reconnect(record.id, AbortSignal.timeout(30_000), { mode: 'light', ...(docker ? { localPath: mount } : {}) })
     assert.notEqual(lightweight.workspaceId, record.workspaceId)
     assert.equal(lightweight.target.remotePath, record.target.remotePath)
     const command = await light.run(lightweight.id, 'printf lifecycle-ok', { timeoutMs: 10_000 })

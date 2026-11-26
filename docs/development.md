@@ -67,7 +67,7 @@ DSH 当前未提供项目标题装饰插槽，远程图标由独立 DOM 适配�
 
 浏览器入口使用 DSH 的 `window.__ModuleLoader__.load` 包装，React 由宿主加载。测试必须检查实际发布的经典脚本，不能只测试 TypeScript 源码或 ESM 导入。
 
-兼容范围见根目录 `package.json` 的 `dsh.engines.dsh`；已验证协议版本见 `src/types.ts` 的 `VERIFIED_DSH_VERSION`。当前为 **0.2.2-rc.1**。全量后端固定安装这个协议版本，不自动跟随 npm 的 DSH 最新版本。
+当前兼容目标见 `package.json` 的 `dsh.engines.dsh` 与 `src/types.ts` 的 `TARGET_DSH_VERSION`，当前为 **0.2.2-rc.5**。全量后端固定安装此版本，不自动跟随 npm 最新版本。`VERIFIED_DSH_VERSION` 仍记录上游 rc.1 实机基准；rc.5 的真实后端与客户端验收结果单独记录。
 
 扩大版本范围之前，先验证原生 RPC、Client Module、Sidebar Panel、二进制附件和 Remote Mux 行为，再同步 README 与使用指南。
 
@@ -79,7 +79,7 @@ DSH 当前未提供项目标题装饰插槽，远程图标由独立 DOM 适配�
 ~/.local/share/dsh-ssh-workspaces/
   bootstrap.lock
   node-v24.12.0-linux-x64/       # 系统 Node 不满足要求时安装；另支持 arm64
-  dsh-0.2.2-rc.1/
+  dsh-0.2.2-rc.5/
     node_modules/
     installed.ok
     backend.json
@@ -107,6 +107,8 @@ npx tsx scripts/smoke-backend.ts
 
 `smoke-backend.ts` 面向已准备好的 `Ubuntu-22.04` 及专用测试目录，验证真实远端 DSH 的会话创建、工作区流、终端、文件、附件上传、事件握手，以及全量 → 轻量 → 全量、断开 / 重连与原会话保留。脚本会启动或复用远端后端，但不主动发起付费模型请求。运行前阅读脚本并确认发行版及测试路径适合当前环境。
 
+CI 可使用隔离 Docker 容器，设置 `DSH_SMOKE_DOCKER` 为容器名、`DSH_SMOKE_MOUNT` 为绑定到容器 `/workspace` 的宿主机绝对目录，执行同一脚本。该验收不替代实际客户端、SSH 或 WSL 验证。
+
 WSL 验证不能替代真实 SSH 服务器验证；密码、密钥和证书等认证方式也应分别记录验证范围。不要将测试服务器地址或凭据写入公开文档。
 
 ## Docker 与 Skill 同步的验证边界
@@ -121,7 +123,7 @@ Docker 在传输层复用 Python helper 与字节隧道，本机 CLI 采用无 s
 
 测试使用临时 DSH / Agents HOME，在真实 WSL Python 下覆盖资源传输、可执行脚本、缺失/一致/差异、显式更新、并发变化、跨工作区计划隔离、目录穿越和目标符号链接。DSH 实机验收使用独立本机 profile 和公开演示技能，已通过远端 `skills/list` 确认同步后的技能可被原生目录发现。
 
-Docker 当前只有连接边界、认证复用、完整 ID、停止容器拒绝和 UI 回归；维护者需要在有 Docker daemon 的环境继续运行真实容器验收，不能把这些测试写成端到端 Docker 验收。
+Docker 参数、身份、认证与 UI 回归之外，CI 使用真实隔离 Docker 容器验证全量后端。sudo 密码的握手测试使用模拟子进程；贡献者报告真实 SSH + sudo 密码连接可用。其他认证、桌面及 WSL 组合仍需独立验收。
 
 ## 文档与市场维护
 
@@ -132,3 +134,5 @@ Docker 当前只有连接边界、认证复用、完整 ID、停止容器拒绝�
 市场条目保存在 [`docs/market-entry.yml`](market-entry.yml)。投稿时把这个文件作为 `data/plugins/czp0312__dsh-ssh-workspace.yml` 提交到 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)，遵循其最新贡献规则。DSH Market 与该目录共用数据；只有申请合并并更新目录后，才能称为已收录。
 
 npm 包的 `repository` 已指向本仓库，目录会自动关联 npm 安装源，不应在市场 YAML 中添加未支持的 `npm` 字段。
+
+Windows CI 使用原生 Windows Python 执行元数据、路径、SSH 参数、UI 等测试；需要 Linux 进程组、信号与管道的测试在无 WSL 的 Windows runner 上显式跳过，并在 Linux CI 完整执行。Docker 冒烟测试使用与宿主 runner 相同 UID/GID 的非 root 容器用户验证 0600 挂载探针，不放宽探针权限。

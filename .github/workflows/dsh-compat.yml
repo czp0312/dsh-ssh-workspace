@@ -1,0 +1,59 @@
+name: DSH rc.5 locked build and remote smoke
+on:
+  push:
+    branches: ['main', 'contrib/dsh-rc5-sudo-docker']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.12.0'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm pack --dry-run
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-ssh-workspaces-rc5-${{ runner.os }}
+          path: dsh-ssh-workspaces-*.tgz
+          if-no-files-found: error
+  remote-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.12.0'
+      - run: npm ci --no-audit --no-fund
+      - name: Start isolated glibc Linux backend
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsh-smoke-project"
+          docker run --rm -d --name dsh-compat-backend \
+            --mount "type=bind,source=$RUNNER_TEMP/dsh-smoke-project,target=/workspace" \
+            node:24.12.0-bookworm sleep infinity
+          # Mount probes deliberately use mode 0600. Match the host runner UID/GID
+          # instead of weakening the probe or granting world-readable permissions.
+          docker exec dsh-compat-backend groupadd -o -g "$(id -g)" dshsmoke
+          docker exec dsh-compat-backend useradd -m -o -u "$(id -u)" -g dshsmoke dshsmoke
+          docker exec --user dshsmoke dsh-compat-backend python3 --version
+      - name: Exercise real remote DSH
+        env:
+          DSH_SMOKE_DOCKER: dsh-compat-backend
+          DSH_SMOKE_DOCKER_USER: dshsmoke
+          DSH_SMOKE_MOUNT: ${{ runner.temp }}/dsh-smoke-project
+        run: npx --no-install tsx scripts/smoke-backend.ts
+      - name: Remove disposable container
+        if: always()
+        run: docker rm -f dsh-compat-backend || true

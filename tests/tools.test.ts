@@ -10,6 +10,10 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { bindRemoteAgent, remoteToolDenial } from '../src/tools.js'
 import type { SavedWorkspace } from '../src/types.js'
 
+function guardReason(denial: string | { readonly reason: string }): string {
+  return typeof denial === 'string' ? denial : denial.reason
+}
+
 async function fixture(mode: SandboxMode = 'workspace-write', outcome = 'allowed-once', connection?: { assertAvailable(): void }) {
   const ctx = new Context()
   const system = await ctx.plugin(SystemPrompt)
@@ -84,7 +88,10 @@ test('standing full-access uses the remote transport without a redundant approva
 test('manual disconnection blocks both command and file tools in resumed remote sessions', async t => {
   let paused = true
   const f = await fixture('danger-full-access', 'allowed-once', { assertAvailable() { if (paused) throw new Error('远程项目已断开，请连接后继续。') } }); t.after(f.dispose)
-  assert.match(f.ctx.tools.checkGuards({ ...f.execution, name: 'read_file' })!, /已断开/)
+  // rc.1 returns a string; newer DSH releases return a structured denial.
+  const denial = f.ctx.tools.checkGuards({ ...f.execution, name: 'read_file' })
+  assert.ok(denial, 'disconnected remote file tools must be denied')
+  assert.match(guardReason(denial), /已断开/)
   await assert.rejects(f.tool.execute({ description: 'Must not run offline', command: 'pwd' }, f.execution), /已断开/)
   assert.equal(f.commands.length, 0)
   paused = false

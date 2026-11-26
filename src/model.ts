@@ -47,10 +47,12 @@ export function validateTarget(input: unknown): RemoteTarget {
     const via = value.via === undefined ? undefined : validateTarget(value.via)
     if (via && via.kind !== 'ssh') throw new TypeError('Docker 的远程宿主必须是 SSH。')
     if (via && context) throw new TypeError('Docker context 与 SSH 宿主不能同时指定。')
+    if (value.sudo !== undefined && typeof value.sudo !== 'boolean' && value.sudo !== 'password') throw new TypeError('Docker sudo 模式无效。')
+    if (value.sudo && !via) throw new TypeError('sudo Docker 仅支持 SSH 宿主。')
     const user = value.user === undefined ? undefined : text(value.user, 'Docker user').trim()
     if (user && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]*)?$/.test(user)) throw new TypeError('Docker 用户应为用户名或 UID，可附带 :组名 / GID。')
     if (user === '') throw new TypeError('Docker user must be nonempty')
-    return { kind: 'docker', container, remotePath: path, ...(containerName ? { containerName } : {}), ...(context ? { context } : {}), ...(via ? { via } : {}), ...(user ? { user } : {}) }
+    return { kind: 'docker', container, remotePath: path, ...(containerName ? { containerName } : {}), ...(context ? { context } : {}), ...(via ? { via } : {}), ...(value.sudo === 'password' ? { sudo: 'password' as const } : value.sudo === true ? { sudo: true as const } : {}), ...(user ? { user } : {}) }
   }
   const user = value.user === undefined ? undefined : identifier(value.user, 'user')
   if (user !== undefined && /\s/u.test(user)) throw new TypeError('user must not contain whitespace')
@@ -190,7 +192,7 @@ export function remoteWorkdir(
 
 export function targetKey(target: RemoteTarget): string {
   const value = validateTarget(target)
-  if (value.kind === 'docker') return JSON.stringify(['docker', value.context ?? '', value.via ? targetKey({ ...value.via, remotePath: '/' }) : '', value.container, value.user ?? '', value.remotePath])
+  if (value.kind === 'docker') return JSON.stringify(['docker', value.context ?? '', value.via ? targetKey({ ...value.via, remotePath: '/' }) : '', value.container, value.user ?? '', value.remotePath, ...(value.sudo ? [value.sudo === 'password' ? 'sudo-password' : 'sudo'] : [])])
   return value.kind === 'ssh'
     ? JSON.stringify(['ssh', value.host.toLowerCase(), value.port ?? 22, value.user ?? '', value.remotePath, ...(value.identityFile ? [value.identityFile] : []), ...(value.auth && value.auth !== 'auto' && value.auth !== 'key' ? [value.auth] : []), ...(value.certificateFile ? [value.certificateFile] : [])])
     : JSON.stringify(['wsl', value.distribution.toLowerCase(), value.user ?? '', value.remotePath])

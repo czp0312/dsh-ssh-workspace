@@ -73,6 +73,8 @@
 
 ![真实 DSH 客户端中的 Docker 连接表单](https://raw.githubusercontent.com/czp0312/dsh-ssh-workspace/main/docs/images/docker-connection.jpg)
 
+SSH 宿主 Docker 提供三种显式执行方式：普通 Docker（默认）、免密 sudo Docker（`sudo -n`）及 sudo 密码认证。后者独立输入 sudo 密码，仅在当前 DSH 进程内保留；密码不写入项目登记、命令行或环境变量。插件不会自动提权或修改 sudoers，也不改变容器内用户。管理员授权是前提，不支持强制 TTY、MFA 或自定义交互式 PAM。已有项目默认普通 Docker；改变执行方式时可在隔离测试环境添加新连接。
+
 ### SSH 支持密码、密钥和证书
 
 轻量和全量模式均提供四种登录方式：
@@ -112,6 +114,9 @@
 ![断开共享全量连接后，两个全量项目离线，轻量项目保持在线](https://raw.githubusercontent.com/czp0312/dsh-ssh-workspace/main/docs/images/environment-offline.png)
 
 ## 安装
+
+**DSH 0.2.2-rc.5 适配验证：** 开发依赖及全量后端固定 rc.5，Windows/Linux CI 与真实 Docker 后端冒烟测试通过；贡献者反馈真实 SSH + sudo 密码环境可用。桌面及 WSL 的 rc.5 实机验收、其他认证组合仍需独立验证。下方 rc.1 记录为历史基准。源码测试建议使用隔离 DSH_HOME 和 profile，避免覆盖生产插件。
+
 
 插件版本 **0.4.0**，已实机验证 **DSH 0.2.2-rc.1**。Windows 桌面客户端已验证全量项目侧栏显示；独立 WSL 项目已验证远端文件、终端、附件、断开重连及全量 → 轻量 → 全量后原会话保留。Skill 同步也已通过真实 DSH / WSL 验证。Docker 已完成连接参数、认证、容器身份和界面回归，当前测试环境没有可用的 Docker daemon，尚未完成真实容器验收。0.3.2 进一步实测了环境分组、共享连接、逐项目模式往返、筛选影响范围和窄布局。0.3.3 重构管理界面与交互，远程执行、连接存储和路由逻辑未改动。0.4.0 新增插件内 SSH 主机指纹核对与信任流程，并让主机密钥错误直接指向该面板；主机密钥读取、`known_hosts` 写入、拒绝替换变更指纹的边界已有服务端回归测试，客户端面板有 UI 回归测试覆盖，尚未重新进行真实客户端验收。DSH 声明的兼容范围不等于所有版本都已测试。
 
@@ -156,7 +161,7 @@ WSL 中需要 Python 3 和 Bash。全量模式首次连接还需要下载 Node /
 ### 添加 Docker 项目
 
 1. 点击 **远程工作区 → 添加项目 → DOCKER**，选择 Docker 所在位置。
-2. 本机 / Context 方式可填写已有 Context 名称；SSH 方式填写宿主机的登录信息。
+2. 本机 / Context 方式可填写已有 Context 名称；SSH 方式填写宿主机登录信息，明确选择普通 Docker、免密 sudo 或 sudo 密码认证。
 3. 点击「读取容器」，选择运行中的容器，或直接填写名称 / ID。
 4. 填写容器内项目目录，按需指定容器内用户。
 5. 选择运行模式。轻量模式填写已与容器目录双向共享的本机路径；全量模式无需挂载。

@@ -79,7 +79,7 @@ async function mount({ respond, initialSaved = [], hostPaths, navigate } = {}) {
         if (result !== undefined) return result
       }
       switch (method) {
-        case 'status': return { ok: true, value: { pluginVersion: manifest.version, verifiedDshVersion: '0.2.2-rc.1', platform: 'win32', workspaces: [...saved] } }
+        case 'status': return { ok: true, value: { pluginVersion: manifest.version, verifiedDshVersion: '0.2.2-rc.1', targetDshVersion: '0.2.2-rc.5', platform: 'win32', workspaces: [...saved] } }
         case 'wsl/list': return { ok: true, value: ['Ubuntu-22.04'] }
         case 'browse': return { ok: true, value: { path: input.path, directories: ['subproject'] } }
         case 'test': return { ok: true, value: { path: input.target.remotePath, home: '/home/test', user: 'test', platform: 'Linux', python: '3.10.12' } }
@@ -561,6 +561,19 @@ test('Docker supports context discovery, a separate SSH engine identity, and lig
     assert.deepEqual(tested.target, { kind: 'docker', container: containerId, user: 'app-user', remotePath: '/workspace/demo', via: { kind: 'ssh', host: 'docker-host', port: 2222, user: 'developer', auth: 'password', remotePath: '/' } })
     assert.deepEqual(tested.credentials, { password: 'synthetic-docker-password' })
     assert.equal(tested.target.context, undefined, 'a hidden context is not sent to an SSH engine')
+    await select('dockerExecution', 'sudo')
+    await click(button('读取容器'))
+    assert.equal(fixture.calls.filter(call => call.method === 'docker/list').at(-1).input.sudo, true)
+    await click(button('测试连接'))
+    assert.equal(fixture.calls.filter(call => call.method === 'test').at(-1).input.target.sudo, true)
+    await select('dockerExecution', 'sudo-password')
+    await input('sudoPassword', 'synthetic-sudo-password')
+    await click(button('测试连接'))
+    const sudoTest = fixture.calls.filter(call => call.method === 'test').at(-1).input
+    assert.equal(sudoTest.target.sudo, 'password')
+    assert.equal(sudoTest.credentials.sudoPassword, 'synthetic-sudo-password')
+    assert.equal(sudoTest.target.sudoPassword, undefined)
+    assert.match(document.querySelector('.dsh-ssh__version').textContent, /适配 DSH 0\.2\.2-rc\.5/)
     await click(document.querySelector('input[type="radio"][value="light"]'))
     await input('localPath', 'D:\\shared-demo')
     await click(button('添加到工作区'))

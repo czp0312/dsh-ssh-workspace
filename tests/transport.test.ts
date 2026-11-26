@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, realpath } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { REMOTE_HELPER, type HelperRequest } from '../src/remote-helper.js'
-import { buildInvocation, buildPythonInvocation, decodeWslList, quotePosix, RemoteTransport, transportEnvironment, validateIdentityFile, type Invocation } from '../src/transport.js'
+import { buildInvocation, buildPythonInvocation, buildDockerInvocation, decodeWslList, quotePosix, RemoteTransport, transportEnvironment, validateIdentityFile, type Invocation } from '../src/transport.js'
 import type { RemoteTarget } from '../src/types.js'
 
 const target: RemoteTarget = { kind: 'wsl', distribution: 'Test Linux', remotePath: '/test-work' }
@@ -48,6 +48,9 @@ function findPython() {
 }
 
 const python = findPython()
+// The real remote runner uses Linux process groups, signals and POSIX pipe polling.
+// Native Windows Python is useful for metadata/argv tests, not a Linux backend.
+const posixRunnerOnly = { skip: process.platform === 'win32' && !python.wsl ? 'requires Linux or WSL Python; covered by Linux CI' : false }
 const remote = (path: string) => python.wsl ? '/mnt/' + path[0]!.toLowerCase() + path.slice(2).replaceAll('\\', '/') : path
 function pythonSync(code: string, args: string[] = []): string {
   const result = spawnSync(python.executable, [...python.prefix, '-c', code, ...args], {
@@ -96,7 +99,7 @@ class LocalTransport extends RemoteTransport {
 }
 
 async function fixture(t: TestContext) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-ssh-transport-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ssh-transport-')))
   const transport = new LocalTransport(root)
   t.after(async () => { await transport.dispose(); await rm(root, { recursive: true, force: true }) })
   return { root, transport }
@@ -275,7 +278,7 @@ test('listWsl/inspect/browse run the real helper and preserve Unicode, quotes, a
   await assert.rejects(transport.browse(target, '/test-work/file.txt'), /directory/)
 })
 
-test('nonzero foreground exit is a result with separate stdout/stderr, not an exception', async t => {
+test('nonzero foreground exit is a result with separate stdout/stderr, not an exception', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const result = await transport.run(target, command('import sys;print("out");print("err",file=sys.stderr);sys.exit(7)'))
   assert.equal(result.exitCode, 7)
@@ -286,7 +289,7 @@ test('nonzero foreground exit is a result with separate stdout/stderr, not an ex
   assert.equal(transport.calls.length, 1)
 })
 
-test('Bash startup cannot change the requested cwd; command/path stay separate positional arguments', async t => {
+test('Bash startup cannot change the requested cwd; command/path stay separate positional arguments', posixRunnerOnly, async t => {
   const { root, transport } = await fixture(t)
   const path = join(root, "space ' 中文")
   await mkdir(path)
@@ -298,7 +301,7 @@ test('Bash startup cannot change the requested cwd; command/path stay separate p
   assert.equal(result.stdout.trim(), remote(path))
 })
 
-test('both output streams are bounded tails while excess output is drained, including a zero-byte cap', async t => {
+test('both output streams are bounded tails while excess output is drained, including a zero-byte cap', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const script = command('import sys;sys.stdout.write("A"*200000+"stdout-tail");sys.stderr.write("B"*200000+"stderr-tail")')
   const result = await transport.run(target, script, { maxOutputBytes: 127 })
@@ -315,7 +318,7 @@ test('both output streams are bounded tails while excess output is drained, incl
   assert.ok(empty.stdoutTruncated && empty.stderrTruncated)
 })
 
-test('a real deadline stops the command and its descendants without retrying', async t => {
+test('a real deadline stops the command and its descendants without retrying', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const result = await transport.run(target, command('import subprocess,sys,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);print(p.pid,flush=True);time.sleep(60)'), { timeoutMs: 3000 })
   // The helper enforces the same deadline remotely and may report it first: 124 is its
@@ -328,7 +331,7 @@ test('a real deadline stops the command and its descendants without retrying', a
   assertDead(pid)
 })
 
-test('asynchronous abort cleans a TERM-resistant descendant and returns an aborted result once', async t => {
+test('asynchronous abort cleans a TERM-resistant descendant and returns an aborted result once', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const controller = new AbortController()
   transport.onData = data => { if (/\d/.test(data)) controller.abort() }
@@ -339,7 +342,7 @@ test('asynchronous abort cleans a TERM-resistant descendant and returns an abort
   assertDead(Number(result.stdout.trim()))
 })
 
-test('successful foreground completion also cleans descendants holding inherited pipes', async t => {
+test('successful foreground completion also cleans descendants holding inherited pipes', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const result = await transport.run(target, command('import subprocess,sys,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);print(p.pid,flush=True)'))
   assert.equal(result.exitCode, 0, result.stderr)
@@ -347,7 +350,7 @@ test('successful foreground completion also cleans descendants holding inherited
   assertDead(Number(result.stdout.trim()))
 })
 
-test('dispose aborts/drains concurrent commands, is idempotent, and rejects subsequent work', async t => {
+test('dispose aborts/drains concurrent commands, is idempotent, and rejects subsequent work', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   let started = 0
   transport.onData = data => { if (data.includes('ready')) started++ }
@@ -465,7 +468,7 @@ test('the helper cannot overwrite an existing probe and never follows a probe sy
   }
 })
 
-test('helper itself expires an abandoned lease or EOF, and refuses to start after initial stdin EOF', async t => {
+test('helper itself expires an abandoned lease or EOF, and refuses to start after initial stdin EOF', posixRunnerOnly, async t => {
   const { root } = await fixture(t)
   for (const mode of ['lease', 'eof', 'before-start', 'timeout'] as const) {
     const marker = join(root, mode)
@@ -493,7 +496,7 @@ test('helper itself expires an abandoned lease or EOF, and refuses to start afte
   }
 })
 
-test('helper keeps a foreground command alive with periodic heartbeats', async t => {
+test('helper keeps a foreground command alive with periodic heartbeats', posixRunnerOnly, async t => {
   const { transport } = await fixture(t)
   const result = await transport.run(target, 'sleep 5.4; printf heartbeat-ok', { timeoutMs: 10000 })
   assert.equal(result.exitCode, 0, result.stderr)
@@ -525,5 +528,62 @@ test('host-key verification is wired only to SSH-backed targets', async () => {
     await assert.rejects(transport.trustHostKeys(ssh, ['not-a-fingerprint']))
     const docker: RemoteTarget = { kind: 'docker', container: 'b'.repeat(64), via: ssh, remotePath: '/' }
     await assert.rejects(transport.trustHostKeys(docker, ['not-a-fingerprint']), /无效/)
+  } finally { await transport.dispose() }
+})
+
+
+test('SSH Docker sudo is explicit, noninteractive and shared by list and Python tunnel invocations', () => {
+  const direct = buildDockerInvocation({ via: ssh }, ['ps'])
+  const elevated = buildDockerInvocation({ via: ssh, sudo: true }, ['ps'])
+  const parse = (invocation: Invocation) => JSON.parse(pythonSync('import json,shlex,sys;print(json.dumps(shlex.split(sys.argv[1])))', [invocation.args.at(-1)!]))
+  assert.deepEqual(parse(direct), ['docker', 'ps'])
+  assert.deepEqual(parse(elevated), ['sudo', '-n', '--', 'docker', 'ps'])
+  const docker: RemoteTarget = { kind: 'docker', container: 'demo', via: ssh, sudo: true, user: 'app', remotePath: '/' }
+  assert.deepEqual(parse(buildPythonInvocation(docker, 'pass', {})).slice(0, 10), ['sudo', '-n', '--', 'docker', 'exec', '-i', '--user', 'app', 'demo', 'python3'])
+  assert.throws(() => buildDockerInvocation({ sudo: true }, ['ps']), /仅支持 SSH/)
+})
+
+test('Docker socket and sudo failures are not classified as SSH authentication failures', async () => {
+  class ErrorTransport extends RemoteTransport {
+    constructor(private readonly message: string, private readonly code: number) { super() }
+    protected override spawnProcess(_invocation: Invocation): ChildProcessWithoutNullStreams {
+      return super.spawnProcess({ executable: process.execPath, args: ['-e', `process.stderr.write(${JSON.stringify(this.message)});process.exit(${this.code})`] })
+    }
+  }
+  for (const [message, code, expected, auth] of [
+    ['permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock', 1, /Docker daemon 权限不足/, false],
+    ['sudo: a password is required', 1, /非交互式授权/, false],
+    ['alice@server: Permission denied (publickey,password).', 255, /SSH 认证失败/, true],
+  ] as const) {
+    const transport = new ErrorTransport(message, code)
+    try {
+      await assert.rejects(transport.listDocker({ via: ssh }), error => {
+        assert.ok(error instanceof Error)
+        assert.match(error.message, expected)
+        assert.equal(error.message.includes('SSH 认证失败'), auth)
+        return true
+      })
+    } finally { await transport.dispose() }
+  }
+})
+
+
+test('password sudo waits for prompt and container readiness before forwarding data', async () => {
+  const docker: RemoteTarget = { kind: 'docker', container: 'demo', via: ssh, sudo: 'password', remotePath: '/' }
+  const secret = 'test-sudo-secret'
+  class SudoTransport extends RemoteTransport {
+    protected override spawnProcess(invocation: Invocation): ChildProcessWithoutNullStreams {
+      const command = invocation.args.at(-1)!
+      assert.ok(!JSON.stringify(invocation).includes(secret))
+      const prompt = command.match(/DSH_SUDO_PROMPT_[a-f0-9]{32}/)![0]
+      const ready = command.match(/DSH_SUDO_READY_[a-f0-9]{32}/)![0]
+      const code = `let buf='';let authed=false;process.stderr.write(${JSON.stringify(prompt.slice(0, 15))});setTimeout(()=>process.stderr.write(${JSON.stringify(prompt.slice(15))}),30);process.stdin.on('data',d=>{buf+=d;const i=buf.indexOf('\\n');if(!authed&&i>=0){if(buf.slice(0,i)!==${JSON.stringify(secret)}||buf.length!==i+1)process.exit(2);buf='';authed=true;process.stderr.write(${JSON.stringify(ready)});return}if(authed&&buf.includes('business')){process.stdout.write(JSON.stringify({ok:true}));process.exit(0)}})`
+      return super.spawnProcess({executable:process.execPath,args:['-e',code]})
+    }
+  }
+  const transport = new SudoTransport()
+  try {
+    transport.setCredentials(docker, { sudoPassword: secret })
+    assert.deepEqual(await transport.pythonInput(docker, 'pass', { value: 'business' }), { ok: true })
   } finally { await transport.dispose() }
 })

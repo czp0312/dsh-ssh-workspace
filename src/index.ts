@@ -12,7 +12,7 @@ import { WorkspaceManager } from './manager.js'
 import { bindRemoteAgent } from './tools.js'
 import { registerManagementRoutes } from './rpc.js'
 import type { SandboxPolicyApi, WorkingDirectoryApi } from './tools.js'
-import { PLUGIN_VERSION, VERIFIED_DSH_VERSION } from './types.js'
+import { PLUGIN_VERSION, TARGET_DSH_VERSION, VERIFIED_DSH_VERSION } from './types.js'
 import type { PluginConfig, ReconnectRequest } from './types.js'
 import { RemoteBackends } from './backends.js'
 import { WorkspaceConnections } from './connections.js'
@@ -36,7 +36,7 @@ function idOf(input: unknown): string {
 /** Broker for complete remote DSH backends; legacy mounts retain their old routing. */
 export async function apply(ctx: Context, config: PluginConfig = {}): Promise<void> {
   if (typeof ctx.connection.fetch.register !== 'function' || typeof ctx.tools.guard !== 'function') {
-    throw new Error(`dsh-ssh-workspaces 需要 DSH ${VERIFIED_DSH_VERSION} 的 Connection/Tools 接口。`)
+    throw new Error(`dsh-ssh-workspaces 需要 DSH ${TARGET_DSH_VERSION} 的 Connection/Tools 接口。`)
   }
   const stateFile = config.stateFile ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'ssh-workspaces.json')
   if (!isAbsolute(stateFile)) throw new Error('stateFile 必须是绝对路径。')
@@ -106,12 +106,12 @@ export async function apply(ctx: Context, config: PluginConfig = {}): Promise<vo
       let value: unknown
       switch (endpoint) {
         case 'status':
-          value = { pluginVersion: PLUGIN_VERSION, verifiedDshVersion: VERIFIED_DSH_VERSION, platform: process.platform, workspaces: connections.list(), sources: backends.sources(), modes: ['light', 'full'] }
+          value = { pluginVersion: PLUGIN_VERSION, verifiedDshVersion: VERIFIED_DSH_VERSION, targetDshVersion: TARGET_DSH_VERSION, platform: process.platform, workspaces: connections.list(), sources: backends.sources(), modes: ['light', 'full'] }
           break
         case 'wsl/list': value = await transport.listWsl(signal); break
         case 'docker/list': {
           const request = object(payload)
-          const target = validateTarget({ kind: 'docker', container: 'list', remotePath: '/', context: request.context, via: request.via })
+          const target = validateTarget({ kind: 'docker', container: 'list', remotePath: '/', context: request.context, via: request.via, sudo: request.sudo })
           if (target.kind !== 'docker') throw new Error('Invalid Docker host')
           transport.setCredentials(target, request.credentials)
           value = await transport.listDocker(target, signal); break

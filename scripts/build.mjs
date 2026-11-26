@@ -50,4 +50,5 @@ if (/^\s*(?:import|export)\s/m.test(client)) errors.push('browser bundle contain
 if (!client.includes('require("react")')) errors.push('React must be resolved by the DSH module loader')
 if (errors.length) throw new Error(`Invalid DSH client bundle: ${errors.join('; ')}`)
 
-console.log('Built host and DSH module-loader client for DSH 0.2.2-rc.1')
+const manifest = JSON.parse(await readFile('package.json', 'utf8'))
+console.log(`Built host and DSH module-loader client for DSH ${manifest.devDependencies['@deepseek-ai/dsh-tools']}`)

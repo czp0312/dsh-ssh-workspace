@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, unlink, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, unlink, rm, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WorkspaceManager } from '../src/manager.js'
@@ -9,7 +9,7 @@ import { WorkspaceStore } from '../src/storage.js'
 import type { RemoteTarget, SavedWorkspace } from '../src/types.js'
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-ssh-manager-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ssh-manager-')))
   const mount = join(root, 'mount')
   const wrong = join(root, 'wrong')
   await Promise.all([mkdir(mount), mkdir(wrong)])
